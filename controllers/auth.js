@@ -105,75 +105,287 @@ exports.register = async function (req, res) {
  * User Login
  * This function verifies user credentials and generates authentication tokens.
  */
-exports.login = async function (req, res) {
-    console.log('Login function called with body:', {...req.body, password: '[HIDDEN]'});
+/**
+ * User login function
+ */
+// In your auth.js controller
+exports.login = async (req, res) => {
     try {
-        console.log('Extracting email and password from request...');
-        const { email, password } = req.body;
-        console.log('Finding user with email:', email);
-        const user = await User.findOne({ email });
-        console.log('User found:', user ? 'Yes' : 'No');
-
-        if (!user) {
-            console.log('User not found, returning 404');
-            return res.status(404).json({ message: 'User not found. Check your email and try again' });
-        }
-
-        console.log('Verifying password...');
-        const passwordIsValid = bcrypt.compareSync(password, user.passwordHash);
-        console.log('Password valid:', passwordIsValid);
+        console.log('login function called with body:', { 
+            email: req.body.email, 
+            password: req.body.password ? '[HIDDEN]' : undefined 
+        });
         
-        // Fix: Incorrect password response logic
-        if (!passwordIsValid) {
-            console.log('Invalid password, returning 400');
-            return res.status(400).json({ message: 'Incorrect password!' });
+        // Validate input
+        const { email, password } = req.body;
+        if (!email || !password) {
+            return res.status(400).json({ message: 'Email and password are required' });
         }
-
-        console.log('Generating access token...');
-        // Generate authentication tokens
-        const accessToken = jwt.sign(
-            { id: user.id, isAdmin: user.isAdmin },
+        
+        // Find user by email
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(400).json({ message: 'Invalid credentials' });
+        }
+        
+        // Verify password
+        const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
+        if (!isPasswordValid) {
+            return res.status(400).json({ message: 'Invalid credentials' });
+        }
+        
+        // Generate JWT token - CRITICAL: Include userId in payload
+        console.log('Generating tokens for user:', user._id);
+        const token = jwt.sign(
+            { 
+                userId: user._id.toString(), // Convert ObjectId to string explicitly
+                isAdmin: user.isAdmin 
+            },
             process.env.ACCESS_TOKEN_SECRET,
-            { expiresIn: '24h' }
+            { expiresIn: '7d' }
         );
-        console.log('Access token generated');
-
-        console.log('Generating refresh token...');
-        const refreshToken = jwt.sign(
-            { id: user.id },
-            process.env.REFRESH_TOKEN,
-            { expiresIn: '60d' }
-        );
-        console.log('Refresh token generated');
-
-        // Remove existing token entry if present
-        console.log('Checking for existing tokens...');
-        const token = await Token.findOne({ userId: user.id });
-        console.log('Existing token found:', token ? 'Yes' : 'No');
-        if (token) {
-            console.log('Deleting existing token...');
-            await token.deleteOne();
-            console.log('Existing token deleted');
-        }
-
-        // Save new tokens in the database
-        console.log('Saving new tokens in the database...');
-        const newToken = new Token({ userId: user.id, accessToken, refreshToken });
-        await newToken.save();
-        console.log('New token saved with ID:', newToken._id);
-
-        // Exclude passwordHash from response
-        console.log('Removing password hash from response');
-        user.passwordHash = undefined;
-
-        console.log('Sending successful login response');
-        return res.json({ ...user._doc, accessToken });
+        
+        // Save token to database
+        console.log('Saving tokens to the database...');
+        const tokenDocument = new Token({
+            userId: user._id,
+            token: token
+        });
+        
+        await tokenDocument.save();
+        console.log('Tokens saved successfully');
+        
+        // Return success response
+        console.log('Login successful for user ID:', user._id);
+        return res.status(200).json({
+            user: {
+                id: user._id,
+                email: user.email,
+                name: user.name,
+                isAdmin: user.isAdmin
+            },
+            token
+        });
     } catch (error) {
-        console.error('Error during login:', error);
-        return res.status(500).json({ type: error.name, message: error.message });
+        console.error('Error in login:', error);
+        return res.status(500).json({ message: error.message });
+    }
+};
+/**
+ * Refresh Access Token
+ * Uses the refresh token stored in a secure cookie to generate a new access token
+ */
+exports.refreshToken = async function(req, res) {
+    console.log('refreshToken function called');
+    
+    try {
+        // Get refresh token from cookie
+        console.log('Getting refresh token from cookie...');
+        const refreshToken = req.cookies.refreshToken;
+        console.log('Refresh token from cookie:', refreshToken ? 'exists' : 'missing');
+        
+        if (!refreshToken) {
+            console.log('No refresh token provided in cookie');
+            return res.status(401).json({ message: 'Refresh token required' });
+        }
+        
+        // Find token in database
+        console.log('Finding token in database by refresh token...');
+        const tokenDoc = await Token.findOne({ refreshToken });
+        console.log('Token document found:', tokenDoc ? 'Yes' : 'No');
+        
+        if (!tokenDoc) {
+            console.log('Token not found in database, clearing cookie');
+            res.clearCookie('refreshToken', {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'strict',
+                path: '/api/v1/refresh-token'
+            });
+            return res.status(401).json({ message: 'Invalid refresh token' });
+        }
+        
+        // Verify refresh token
+        console.log('Verifying refresh token signature...');
+        try {
+            const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+            console.log('Token verified for user:', decoded.userId);
+            
+            // Get user
+            console.log('Finding user by ID:', decoded.userId);
+            const user = await User.findById(decoded.userId);
+            console.log('User found:', user ? 'Yes' : 'No');
+            
+            if (!user) {
+                console.log('User not found, clearing cookie and deleting token');
+                res.clearCookie('refreshToken', {
+                    httpOnly: true,
+                    secure: process.env.NODE_ENV === 'production',
+                    sameSite: 'strict',
+                    path: '/api/v1/refresh-token'
+                });
+                await Token.findByIdAndDelete(tokenDoc._id);
+                return res.status(401).json({ message: 'User not found' });
+            }
+            
+            // Generate new access token
+            console.log('Generating new access token...');
+            const accessToken = jwt.sign(
+                {
+                    userId: user._id,
+                    isAdmin: user.isAdmin
+                },
+                process.env.ACCESS_TOKEN_SECRET,
+                { expiresIn: '15m' }
+            );
+            
+            // Update token in database
+            console.log('Updating access token in database...');
+            tokenDoc.accessToken = accessToken;
+            await tokenDoc.save();
+            console.log('Access token updated in database');
+            
+            console.log('Refresh successful, returning new access token');
+            return res.json({
+                message: 'Token refreshed successfully',
+                token: accessToken
+            });
+        } catch (err) {
+            console.log('Token verification failed:', err.message);
+            console.log('Clearing refresh token cookie...');
+            res.clearCookie('refreshToken', {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'strict',
+                path: '/api/v1/refresh-token'
+            });
+            console.log('Deleting token from database...');
+            await Token.findByIdAndDelete(tokenDoc._id);
+            return res.status(401).json({ message: 'Invalid or expired refresh token' });
+        }
+    } catch (error) {
+        console.error('Error in refreshToken:', error);
+        return res.status(500).json({ 
+            type: error.name,
+            message: error.message
+        });
     }
 };
 
+/**
+ * Logout User
+ * Clears the refresh token cookie and removes the token from database
+ */
+exports.logout = async function(req, res) {
+    console.log('logout function called');
+    
+    try {
+        // Get refresh token from cookie
+        console.log('Getting refresh token from cookie...');
+        const refreshToken = req.cookies.refreshToken;
+        console.log('Refresh token from cookie:', refreshToken ? 'exists' : 'missing');
+        
+        // Clear cookie regardless of token validity
+        console.log('Clearing refresh token cookie...');
+        res.clearCookie('refreshToken', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'strict',
+            path: '/'
+        });
+        
+        // If we have a token, remove it from database
+        if (refreshToken) {
+            console.log('Removing token from database...');
+            const result = await Token.findOneAndDelete({ refreshToken });
+            console.log('Token removed from database:', result ? 'Yes' : 'No');
+        }
+        
+        console.log('Logout completed successfully');
+        return res.json({ message: 'Logout successful' });
+    } catch (error) {
+        console.error('Error in logout:', error);
+        return res.status(500).json({ 
+            type: error.name,
+            message: error.message 
+        });
+    }
+};
+
+/**
+ * Check Auth Status
+ * Verifies if user is logged in by checking access token
+ */
+exports.checkAuthStatus = async function(req, res) {
+    console.log('checkAuthStatus function called');
+    console.log('Headers received:', req.headers);
+    
+    try {
+        // Check for authorization header
+        console.log('Getting authorization header...');
+        const authHeader = req.headers.authorization;
+        console.log('Authorization header:', authHeader ? 'exists' : 'missing');
+        
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            console.log('Invalid or missing authorization header');
+            return res.json({ isLoggedIn: false });
+        }
+        
+        // Extract token
+        const accessToken = authHeader.split(' ')[1];
+        console.log('Access token extracted:', accessToken ? 'exists' : 'missing');
+        
+        if (!accessToken) {
+            console.log('No token after Bearer prefix');
+            return res.json({ isLoggedIn: false });
+        }
+        
+        // Try to verify token
+        try {
+            console.log('Verifying access token...');
+            const decoded = jwt.verify(accessToken, process.env.ACCESS_TOKEN_SECRET);
+            console.log('Access token verified for user:', decoded.userId);
+            
+            // Check if token exists in database for extra security
+            console.log('Checking if token exists in database...');
+            const tokenExists = await Token.findOne({ accessToken });
+            console.log('Token found in database:', tokenExists ? 'Yes' : 'No');
+            
+            if (!tokenExists) {
+                console.log('Token not found in database');
+                return res.json({ isLoggedIn: false });
+            }
+            
+            // Token is valid and exists in database
+            console.log('User is authenticated');
+            return res.json({ 
+                isLoggedIn: true,
+                userId: decoded.userId,
+                isAdmin: decoded.isAdmin 
+            });
+        } catch (err) {
+            console.log('Token verification failed:', err.message);
+            
+            // If token is expired, check if we have a refresh token cookie
+            if (err.name === 'TokenExpiredError' && req.cookies.refreshToken) {
+                console.log('Access token expired but refresh token exists');
+                return res.json({ 
+                    isLoggedIn: false, 
+                    tokenExpired: true,
+                    hasRefreshToken: true 
+                });
+            }
+            
+            return res.json({ isLoggedIn: false });
+        }
+    } catch (error) {
+        console.error('Error in checkAuthStatus:', error);
+        return res.status(500).json({ 
+            type: error.name,
+            message: error.message
+        });
+    }
+};
 /**
  * Token Verification
  * This function checks if the provided access token is valid.
@@ -235,7 +447,7 @@ exports.verifyToken = async function (req, res) {
 
             console.log('Verifying refresh token...');
             try {
-                const isValid = jwt.verify(token.refreshToken, process.env.REFRESH_TOKEN);
+                const isValid = jwt.verify(token.refreshToken, process.env.REFRESH_TOKEN_SECRET);
                 console.log('Token verification completed');
                 console.log('Token validation result:', isValid ? 'Valid' : 'Invalid');
                 console.log('Sending response: true');
@@ -472,3 +684,4 @@ exports.resetPassword = async function (req, res) {
        return res.status(500).json({ type: error.name, message: error.message });
    }
 };
+

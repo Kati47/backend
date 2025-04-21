@@ -29,7 +29,6 @@ const validatePassword=[
 
 ];
 
-
 // Route for user login - Calls the 'login' method from the authentication controller
 router.post('/login', authController.login);
 
@@ -44,6 +43,13 @@ router.post('/forgot-password', authController.forgotPassword);
 // Route for verifying OTP during password reset - Calls 'verifyPasswordResetOTP' method
 router.post('/verify-otp', authController.verifyPasswordResetOTP);
 
+// Refresh token route (no JWT auth required)
+router.post('/refresh-token', authController.refreshToken);
+
+router.get('/refresh-auth-status', authController.checkAuthStatus);
+
+// Logout route
+router.post('/logout', authController.logout);
 // Route for resetting the password - Calls 'resetPassword' method
 router.post('/reset-password', validatePassword,authController.resetPassword);
 
