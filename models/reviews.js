@@ -23,6 +23,21 @@ const ReviewSchema = new mongoose.Schema({
         trim: true,
         maxlength: 100
     },
+    status: {
+        type: String,
+        enum: ['approved', 'rejected'],
+        default: 'approved' // Default to approved if it passes filters
+    },
+    flagLevel: {
+        type: String,
+        enum: ['green', 'yellow', 'red'],
+        default: 'green'
+    },
+    rejectionReason: String,
+    autoModerated: {
+        type: Boolean,
+        default: true
+    },
     comment: {
         type: String,
         required: true,

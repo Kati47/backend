@@ -6,6 +6,11 @@ console.log('⭐ Review routes initialization started');
 // Create a new review
 router.post('/', reviewController.createReview);
 
+
+router.get('/', reviewController.getAllReviews);
+
+router.get('/users', reviewController.getAllReviewUsers);
+
 // Get all reviews for a product
 router.get('/product/:productId', reviewController.getProductReviews);
 

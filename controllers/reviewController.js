@@ -568,3 +568,184 @@ exports.deleteReview = async (req, res) => {
         });
     }
 };
+// ...existing code...
+
+// Get all reviews (with pagination and filtering)
+exports.getAllReviews = async (req, res) => {
+    console.log('⭐ GET /reviews - Get all reviews request received');
+    console.log('🔑 Auth headers:', req.headers.authorization ? 'Present' : 'Missing');
+    console.log('🔄 Query parameters:', req.query);
+    
+    try {
+        const { rating, sort, page = 1, limit = 10 } = req.query;
+        console.log(`🔍 Using pagination: page=${page}, limit=${limit}`);
+        console.log(`🔍 Using filters: rating=${rating || 'all'}, sort=${sort || 'default'}`);
+        
+        // Build query based on filters
+        console.log('🔄 Building query with filters');
+        let query = {};
+        
+        // Filter by rating if specified
+        if (rating) {
+            console.log(`🔍 Adding rating filter: ${rating}`);
+            query.rating = parseInt(rating);
+        }
+        
+        console.log('🔎 Using query:', JSON.stringify(query));
+        
+        // Build sort options
+        console.log(`🔄 Building sort options for: ${sort}`);
+        let sortOptions = {};
+        if (sort === 'newest') {
+            sortOptions.createdAt = -1;
+            console.log('🔍 Sorting by newest first');
+        } else if (sort === 'oldest') {
+            sortOptions.createdAt = 1;
+            console.log('🔍 Sorting by oldest first');
+        } else if (sort === 'highest') {
+            sortOptions.rating = -1;
+            console.log('🔍 Sorting by highest rating');
+        } else if (sort === 'lowest') {
+            sortOptions.rating = 1;
+            console.log('🔍 Sorting by lowest rating');
+        } else {
+            // Default sort by newest
+            sortOptions.createdAt = -1;
+            console.log('🔍 Using default sort: newest first');
+        }
+        
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        console.log(`🔍 Pagination calculated: skip=${skip}, limit=${limit}`);
+        
+        // Execute query with pagination
+        console.log('🔄 Executing database query for all reviews');
+        const reviews = await Review.find(query)
+            .sort(sortOptions)
+            .skip(skip)
+            .limit(parseInt(limit))
+            .populate('userId', 'username img')
+            .populate('productId', 'title img price');
+        
+        console.log(`🔍 Query returned ${reviews.length} reviews`);
+        
+        // Count total reviews for pagination
+        console.log('🔄 Counting total reviews for pagination');
+        const totalReviews = await Review.countDocuments(query);
+        console.log(`🔍 Total reviews count: ${totalReviews}`);
+        
+        // Get rating distribution across all reviews
+        console.log('🔄 Running aggregation for overall rating distribution');
+        const ratingDistribution = await Review.aggregate([
+            { $group: { _id: "$rating", count: { $sum: 1 } } },
+            { $sort: { _id: -1 } }
+        ]);
+        
+        // Format distribution for easier frontend use
+        console.log('🔄 Formatting rating distribution');
+        const distributionMap = {};
+        ratingDistribution.forEach(item => {
+            console.log(`🔍 Rating ${item._id}: ${item.count} reviews`);
+            distributionMap[item._id] = item.count;
+        });
+        
+        // Format final distribution with all ratings 1-5
+        const formattedDistribution = {
+            5: distributionMap[5] || 0,
+            4: distributionMap[4] || 0,
+            3: distributionMap[3] || 0,
+            2: distributionMap[2] || 0,
+            1: distributionMap[1] || 0
+        };
+        
+        console.log('🔄 Preparing response with all data');
+        return res.status(200).json({
+            reviews,
+            totalReviews,
+            totalPages: Math.ceil(totalReviews / parseInt(limit)),
+            currentPage: parseInt(page),
+            ratingDistribution: formattedDistribution
+        });
+    } catch (error) {
+        console.error('❌ Error fetching all reviews:', error);
+        console.error('❌ Error stack trace:', error.stack);
+        return res.status(500).json({
+            message: "Failed to fetch reviews",
+            error: error.message
+        });
+    }
+};
+
+// Get all users who have written reviews
+exports.getAllReviewUsers = async (req, res) => {
+    console.log('⭐ GET /reviews/users - Get all review users request received');
+    console.log('🔑 Auth headers:', req.headers.authorization ? 'Present' : 'Missing');
+    console.log('🔄 Query parameters:', req.query);
+    
+    try {
+        const { page = 1, limit = 10 } = req.query;
+        console.log(`🔍 Using pagination: page=${page}, limit=${limit}`);
+        
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        console.log(`🔍 Pagination calculated: skip=${skip}, limit=${limit}`);
+        
+        // Get unique users who have written reviews with their review count
+        console.log('🔄 Running aggregation to find users with review counts');
+        const reviewUsers = await Review.aggregate([
+            { $group: { 
+                _id: "$userId", 
+                reviewCount: { $sum: 1 },
+                averageRating: { $avg: "$rating" },
+                firstReviewDate: { $min: "$createdAt" },
+                lastReviewDate: { $max: "$createdAt" }
+            }},
+            { $sort: { reviewCount: -1 } },
+            { $skip: skip },
+            { $limit: parseInt(limit) }
+        ]);
+        
+        console.log(`🔍 Found ${reviewUsers.length} users with reviews`);
+        
+        // Get total count of unique users who have written reviews
+        const totalUsers = await Review.aggregate([
+            { $group: { _id: "$userId" } },
+            { $count: "total" }
+        ]);
+        
+        const totalReviewUsers = totalUsers.length > 0 ? totalUsers[0].total : 0;
+        console.log(`🔍 Total unique users with reviews: ${totalReviewUsers}`);
+        
+        // Populate user details
+        console.log('🔄 Populating user details');
+        const userIds = reviewUsers.map(user => user._id);
+        
+        // Format the output and fetch user details through the User model
+        const formattedResponse = await Promise.all(reviewUsers.map(async (user) => {
+            // Optional: fetch actual user data from User model if needed
+            // const userData = await User.findById(user._id).select('username email img');
+            
+            return {
+                userId: user._id,
+                reviewCount: user.reviewCount,
+                averageRating: parseFloat(user.averageRating.toFixed(1)),
+                firstReviewDate: user.firstReviewDate,
+                lastReviewDate: user.lastReviewDate
+                // ...userData? (if you fetched user data)
+            };
+        }));
+        
+        console.log('🔄 Preparing response');
+        return res.status(200).json({
+            users: formattedResponse,
+            totalUsers: totalReviewUsers,
+            totalPages: Math.ceil(totalReviewUsers / parseInt(limit)),
+            currentPage: parseInt(page)
+        });
+    } catch (error) {
+        console.error('❌ Error fetching review users:', error);
+        console.error('❌ Error stack trace:', error.stack);
+        return res.status(500).json({
+            message: "Failed to fetch users with reviews",
+            error: error.message
+        });
+    }
+};
