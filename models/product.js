@@ -11,13 +11,12 @@ const ProductSchema = new mongoose.Schema({
     inStock: {type: Boolean, default: true},
     quantity: {type: Number, default: 10},
     lowStockThreshold: {type: Number, default: 5},
-    model3d: new mongoose.Schema({  // Use a nested schema instead
-        url: {type: String},
-        format: {type: String, enum: ['glb', 'gltf', 'obj', 'fbx', 'usdz', 'sketchfab']},
-        modelId: {type: String}, 
-        hasThumbnail: {type: Boolean, default: false},
-        thumbnailUrl: {type: String}
-    }),
+    
+    // 3D model fields (optional)
+    model3d: {type: String, required: false}, // URL to 3D model (Sketchfab or direct file)
+    model3dFormat: {type: String, required: false, enum: ['glb', 'gltf', 'obj', 'fbx', 'usdz', 'sketchfab', 'other']},
+    model3dThumbnail: {type: String, required: false}, // Optional thumbnail for the 3D model
+   
     // Tracking which users have favorited this product
     favoritedBy: [{
         userId: {type: mongoose.Schema.Types.ObjectId, ref: 'User'},
@@ -54,6 +53,23 @@ ProductSchema.pre('save', function(next) {
 ProductSchema.pre('save', function(next) {
     if (this.isModified('quantity')) {
         this.inStock = this.quantity > 0;
+    }
+    next();
+});
+
+// Add a hook to extract model format from URL if provided
+ProductSchema.pre('save', function(next) {
+    if (this.isModified('model3d') && this.model3d) {
+        // Try to determine format from URL extension
+        const url = this.model3d;
+        const extensionMatch = url.match(/\.([a-z0-9]+)($|\?)/i);
+        if (extensionMatch && ['glb', 'gltf', 'obj', 'fbx', 'usdz'].includes(extensionMatch[1])) {
+            this.model3dFormat = extensionMatch[1];
+        } else if (url.includes('sketchfab.com')) {
+            this.model3dFormat = 'sketchfab';
+        } else {
+            this.model3dFormat = 'other';
+        }
     }
     next();
 });

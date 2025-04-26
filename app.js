@@ -16,8 +16,11 @@ const userRouter= require('./routes/users');
 const testRouter= require('./routes/test');
 const errorHandler = require('./middlewares/error_handler');
 const cookieParser = require('cookie-parser');
+const path = require('path');  
 
 const app = express();
+app.use('/images', express.static(path.join(__dirname, 'public/images')));
+
 const env = process.env;
 const API=env.API_URL;
 
@@ -48,7 +51,7 @@ app.use(authJwt());
 app.use(`${API}/products` ,productRouter);
 app.use(`${API}/cart` ,cartRouter);
 app.use(`${API}/order` ,orderRouter);
-app.use(`${API}/reviews` ,reviewRouter); 
+app.use(`${API}/reviews` ,reviewRouter);
 app.use(`${API}/promo` ,promoRouter);
 app.use('/api/checkout' ,paymentRouter);
 app.use(`${API}/users`,userRouter);

@@ -205,6 +205,13 @@ exports.updatePromoCode = async (req, res) => {
             return res.status(400).json({ message: "Invalid promo code ID format" });
         }
 
+        // Get the existing promo code to check date validation
+        const existingPromo = await PromoCode.findById(req.params.id);
+        if (!existingPromo) {
+            console.log(`❌ Promo code not found: ${req.params.id}`);
+            return res.status(404).json({ message: "Promo code not found" });
+        }
+
         // If trying to update code, check it doesn't conflict with existing codes
         if (req.body.code) {
             const code = req.body.code.toUpperCase();
@@ -222,17 +229,44 @@ exports.updatePromoCode = async (req, res) => {
             req.body.code = code;
         }
 
-        // Update the promo code
-        const updatedPromoCode = await PromoCode.findByIdAndUpdate(
-            req.params.id,
-            { $set: req.body },
-            { new: true, runValidators: true }
-        );
+        // Handle date validation manually
+        const updateData = { ...req.body };
 
-        if (!updatedPromoCode) {
-            console.log(`❌ Promo code not found: ${req.params.id}`);
-            return res.status(404).json({ message: "Promo code not found" });
+        // Convert dates properly - always work with both dates together
+        let startDate = existingPromo.startDate;
+        let endDate = existingPromo.endDate;
+
+        // Only update the dates that came in the request
+        if (updateData.startDate) {
+            startDate = new Date(updateData.startDate);
         }
+        
+        if (updateData.endDate) {
+            endDate = new Date(updateData.endDate);
+        }
+
+        // Check if the dates are valid before updating
+        if (endDate <= startDate) {
+            console.log(`❌ Invalid date range: end date must be after start date`);
+            return res.status(400).json({ 
+                message: "End date must be after start date" 
+            });
+        }
+
+        // Set both dates in the update data to ensure they're valid together
+        updateData.startDate = startDate;
+        updateData.endDate = endDate;
+
+        // Update the promo code - use findOne and save to ensure proper validation
+        const promoToUpdate = await PromoCode.findById(req.params.id);
+        
+        // Update fields from updateData
+        Object.keys(updateData).forEach(key => {
+            promoToUpdate[key] = updateData[key];
+        });
+        
+        // Save with validation
+        const updatedPromoCode = await promoToUpdate.save();
 
         console.log(`✅ Promo code updated successfully: ${updatedPromoCode.code}`);
         res.status(200).json(updatedPromoCode);
@@ -244,7 +278,6 @@ exports.updatePromoCode = async (req, res) => {
         });
     }
 };
-
 // Delete a promo code
 exports.deletePromoCode = async (req, res) => {
     console.log(`🗑️ Delete promo code: ${req.params.id}`);

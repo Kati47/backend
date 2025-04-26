@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const promoCodeController = require('../controllers/promoController');
+const mongoose = require('mongoose');
 
 console.log('🚀 Promo code routes initialization started');
 

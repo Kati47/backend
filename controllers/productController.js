@@ -37,32 +37,148 @@ exports.createProduct = async (req, res) => {
     }
 };
 
-// Update an existing product
 exports.updateProduct = async (req, res) => {
     console.log(`📝 Update product ${req.params.id} request received`);
-    console.log('📦 Request body:', req.body);
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    console.log('📋 Update fields:', Object.keys(req.body).join(', '));
     
     try {
-        console.log('🔄 Updating product in database...');
+        // First update the product in the database
+        console.log('🔄 Starting product database update...');
+        console.log('🔍 Looking for product with ID:', req.params.id);
+        
         const updatedProduct = await Product.findByIdAndUpdate(
             req.params.id,
             { $set: req.body },
             { new: true, runValidators: true }
         );
         
+        console.log('🔄 Database update query completed');
+        
         if (!updatedProduct) {
-            console.log(`❌ Product not found: ${req.params.id}`);
+            console.log(`❌ Product not found in database with ID: ${req.params.id}`);
             return res.status(404).json({ message: "Product not found" });
         }
         
-        console.log('✅ Product updated successfully:', updatedProduct._id);
+        console.log('✅ Product found and updated in database:', updatedProduct._id);
+        console.log('📦 Updated product data:', JSON.stringify(updatedProduct, null, 2));
+        
+        // Sync carts with all applicable field changes from the product
+        // Don't limit to just price and stock status
+        try {
+            console.log('🛒 Starting cart synchronization process...');
+            console.log('🔄 Importing Cart model...');
+            const Cart = require('../models/cart');
+            console.log('✅ Cart model imported successfully');
+            
+            console.log('🔍 Building query to find carts with product:', req.params.id);
+            const cartQuery = { 
+                'products': { 
+                    $elemMatch: { 
+                        'productId': { $regex: req.params.id, $options: 'i' } 
+                    } 
+                } 
+            };
+            console.log('📋 Cart query:', JSON.stringify(cartQuery, null, 2));
+            
+            console.log('🔍 Executing cart search query...');
+            const allCarts = await Cart.find(cartQuery);
+            
+            console.log(`🔍 Cart search complete. Found ${allCarts.length} carts containing this product`);
+            if (allCarts.length === 0) {
+                console.log('ℹ️ No carts found containing this product. Nothing to update.');
+            }
+            
+            // Process each cart individually
+            let totalUpdated = 0;
+            console.log('🔄 Beginning to process each cart...');
+            
+            for (let cartIndex = 0; cartIndex < allCarts.length; cartIndex++) {
+                const cart = allCarts[cartIndex];
+                console.log(`🛒 Processing cart #${cartIndex + 1}/${allCarts.length} with ID: ${cart._id}`);
+                console.log(`📋 Cart has ${cart.products.length} products`);
+                
+                let modified = false;
+                console.log('🔍 Searching for matching products in cart...');
+                
+                // Update each product in the cart that matches the ID
+                for (let i = 0; i < cart.products.length; i++) {
+                    const product = cart.products[i];
+                    
+                    console.log(`👀 Examining cart product at index ${i}:`, product.productId);
+                    console.log(`🔍 Comparing: ${product.productId.toString()} vs ${req.params.id.toString()}`);
+                    
+                    if (product.productId.toString() === req.params.id.toString()) {
+                        console.log(`✅ Found matching product in cart at index ${i}`);
+                        
+                        // Define fields that can be updated in cart items
+                        const updatableFields = [
+                            'price', 'inStock', 'title', 'img', 'color', 'size', 'desc'
+                        ];
+                        
+                        // Update all applicable fields from the request body
+                        for (const field of updatableFields) {
+                            if (req.body[field] !== undefined) {
+                                console.log(`📝 Updating ${field} from "${product[field]}" to "${req.body[field]}"`);
+                                product[field] = req.body[field];
+                                modified = true;
+                            }
+                        }
+                        
+                        // Special handling for quantity affecting inStock
+                        if (req.body.quantity !== undefined) {
+                            const newInStock = req.body.quantity > 0;
+                            if (product.inStock !== newInStock) {
+                                console.log(`📦 Updating inStock based on quantity: ${product.inStock} → ${newInStock}`);
+                                product.inStock = newInStock;
+                                modified = true;
+                            }
+                        }
+                    } else {
+                        console.log(`❌ Product at index ${i} does not match target ID`);
+                    }
+                }
+                
+                // Save the cart if modified
+                if (modified) {
+                    console.log(`💾 Cart ${cart._id} was modified, saving changes...`);
+                    try {
+                        await cart.save();
+                        console.log(`✅ Cart ${cart._id} saved successfully`);
+                        totalUpdated++;
+                    } catch (saveError) {
+                        console.error(`❌ Error saving cart ${cart._id}:`, saveError);
+                        console.error('Stack trace:', saveError.stack);
+                    }
+                } else {
+                    console.log(`ℹ️ No changes made to cart ${cart._id}, skipping save`);
+                }
+            }
+            
+            console.log(`🛒 Cart processing complete. Updated ${totalUpdated} out of ${allCarts.length} carts`);
+        } catch (cartError) {
+            console.error('❌ Error during cart synchronization:', cartError);
+            console.error('Full error details:', cartError);
+            console.error('Stack trace:', cartError.stack);
+            console.log('⚠️ Continuing with product update despite cart sync error');
+        }
+        
+        console.log('✅ Product update process completed successfully');
+        console.log('🔄 Sending response to client...');
         res.status(200).json(updatedProduct);
+        console.log('✅ Response sent');
     } catch (error) {
-        console.error('❌ Error updating product:', error);
-        res.status(500).json({ message: "Failed to update product", error: error.message });
+        console.error('❌ Fatal error in updateProduct function:', error);
+        console.error('Error name:', error.name);
+        console.error('Error message:', error.message);
+        console.error('Stack trace:', error.stack);
+        res.status(500).json({ 
+            message: "Failed to update product", 
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 };
-
 // Delete a product
 exports.deleteProduct = async (req, res) => {
     console.log(`🗑️ Delete product ${req.params.id} request received`);
@@ -205,7 +321,7 @@ exports.getAllProducts = async (req, res) => {
         category: qCategory, 
         sort, 
         page = 1, 
-        limit = 10,
+        limit = 300,
         userId
     } = req.query;
     

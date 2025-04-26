@@ -13,7 +13,121 @@ const rawBodyParser = express.raw({type: 'application/json'});
 // Use the imported PayPal utility functions
 const paypalClient = paypalService.client;
 const getCountryCode = paypalService.getCountryCode;
+/**
+ * Get all orders with details
+ * Fetches all orders with their complete details, with optional filtering
+ */
+router.get('/', async (req, res) => {
+    console.log('📦 API CALL: GET /orders');
+    try {
+        // Extract query parameters for filtering
+        const { userId, status, startDate, endDate, limit, page } = req.query;
+        
+        // Build query object
+        const query = {};
+        
+        // Add filters if provided
+        if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+            query.userId = userId;
+        }
+        
+        if (status) {
+            query.status = status;
+        }
+        
+        // Date range filter
+        if (startDate || endDate) {
+            query.createdAt = {};
+            
+            if (startDate) {
+                query.createdAt.$gte = new Date(startDate);
+            }
+            
+            if (endDate) {
+                query.createdAt.$lte = new Date(endDate);
+            }
+        }
+        
+        console.log(`🔍 Fetching orders with filters:`, query);
+        
+        // Set up pagination
+        const pageSize = parseInt(limit) || 10;
+        const currentPage = parseInt(page) || 1;
+        const skip = (currentPage - 1) * pageSize;
+        
+        // Find orders with pagination
+        const orders = await Order.find(query)
+            .populate('userId', 'name email phone') // Populate user data directly
+            .sort({ createdAt: -1 }) // Sort by newest first
+            .skip(skip)
+            .limit(pageSize);
+            
+        // Get total count for pagination
+        const totalOrders = await Order.countDocuments(query);
+        
+        console.log(`✅ Found ${orders.length} orders out of ${totalOrders} total matching orders`);
+        
+        return res.status(200).json({
+            success: true,
+            count: orders.length,
+            total: totalOrders,
+            page: currentPage,
+            pages: Math.ceil(totalOrders / pageSize),
+            data: orders
+        });
+    } catch (error) {
+        console.error(`❌ Error fetching orders:`, error);
+        return res.status(500).json({
+            success: false,
+            message: "Error fetching orders",
+            error: error.message
+        });
+    }
+});
 
+/**
+ * Get order by ID
+ * Fetches a single order with complete details
+ */
+router.get('/:id', async (req, res) => {
+    console.log(`📦 API CALL: GET /orders/${req.params.id}`);
+    
+    try {
+        const orderId = req.params.id;
+        
+        // Validate ID format
+        if (!mongoose.Types.ObjectId.isValid(orderId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid order ID format"
+            });
+        }
+        
+        // Find the order
+        const order = await Order.findById(orderId);
+        
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
+        
+        console.log(`✅ Found order: ${order._id}`);
+        
+        return res.status(200).json({
+            success: true,
+            data: order
+        });
+    } catch (error) {
+        console.error(`❌ Error fetching order:`, error);
+        return res.status(500).json({
+            success: false,
+            message: "Error fetching order",
+            error: error.message
+        });
+    }
+});
 /**
  * Handle return from PayPal
  * This endpoint handles users returning from PayPal after approving/canceling payment
@@ -2104,5 +2218,409 @@ router.post('/delete-cart', async (req, res) => {
         });
     }
 });
+/**
+ * Update order details
+ * This endpoint allows updating order information such as status
+ */
+router.put('/:id', async (req, res) => {
+    console.log(`📦 API CALL: PUT /orders/${req.params.id}`);
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const orderId = req.params.id;
+        
+        // Validate ID format
+        if (!mongoose.Types.ObjectId.isValid(orderId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid order ID format"
+            });
+        }
+        
+        // Find the order to update
+        const order = await Order.findById(orderId);
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
+        
+        console.log(`🔍 Found order: ${order._id}, current status: ${order.status}`);
+        
+        // Extract fields to update
+        const {
+            status,
+            trackingNumber,
+            shippingCarrier,
+            notes,
+            address
+        } = req.body;
+        
+        // Create change log for tracking modifications
+        const changes = [];
+        
+        // Update status if provided and different
+        if (status && status !== order.status) {
+            console.log(`📝 Updating order status from ${order.status} to ${status}`);
+            
+            // Validate status value
+            const validStatuses = ["pending", "processing", "shipped", "delivered", "cancelled", "refunded"];
+            if (!validStatuses.includes(status)) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid status value. Must be one of: ${validStatuses.join(', ')}`
+                });
+            }
+            
+            // Add to order status history
+            order.statusHistory.push({
+                status: status,
+                timestamp: new Date(),
+                note: req.body.statusNote || `Status changed from ${order.status} to ${status}`
+            });
+            
+            order.status = status;
+            changes.push(`Status changed to "${status}"`);
+        }
+        
+        // Update tracking information if provided
+        if (trackingNumber && trackingNumber !== order.trackingNumber) {
+            order.trackingNumber = trackingNumber;
+            changes.push(`Tracking number updated to "${trackingNumber}"`);
+        }
+        
+        if (shippingCarrier && shippingCarrier !== order.shippingCarrier) {
+            order.shippingCarrier = shippingCarrier;
+            changes.push(`Shipping carrier updated to "${shippingCarrier}"`);
+        }
+        
+        // Update notes if provided
+        if (notes && notes !== order.notes) {
+            order.notes = notes;
+            changes.push("Order notes updated");
+        }
+        
+        // Update address if provided (partial update supported)
+        if (address && typeof address === 'object') {
+            // Only update provided address fields
+            Object.keys(address).forEach(field => {
+                if (address[field] && order.address[field] !== address[field]) {
+                    order.address[field] = address[field];
+                    changes.push(`Address ${field} updated`);
+                }
+            });
+        }
+        
+        // Only save if there were changes
+        if (changes.length > 0) {
+            console.log(`💾 Saving order with changes: ${changes.join(', ')}`);
+            await order.save();
+            
+            return res.status(200).json({
+                success: true,
+                message: "Order updated successfully",
+                changes: changes,
+                data: order
+            });
+        } else {
+            console.log(`ℹ️ No changes to save`);
+            return res.status(200).json({
+                success: true,
+                message: "No changes detected",
+                data: order
+            });
+        }
+    } catch (error) {
+        console.error(`❌ Error updating order:`, error);
+        return res.status(500).json({
+            success: false,
+            message: "Error updating order",
+            error: error.message
+        });
+    }
+});
+
+/**
+ * Helper function to send cancellation email
+ * @param {Object} order - The cancelled order
+ * @param {String} reason - Cancellation reason
+ * @param {Object} refundDetails - Refund information (null if no refund)
+ * @param {String} overrideEmail - Optional email to use instead of order.userId.email
+ */
+async function sendCancellationEmail(order, reason, refundDetails, overrideEmail = null) {
+    try {
+        console.log('🔄 Starting email cancellation process...');
+        
+        // Import email sender
+        const emailSender = require('../helpers/email_sender');
+        
+        // Determine email address with detailed logging
+        let userEmail = null;
+        
+        // Check override email first
+        if (overrideEmail) {
+            console.log(`📧 Using override email: ${overrideEmail}`);
+            userEmail = overrideEmail;
+        } 
+        // Then check userId object
+        else if (order.userId && order.userId.email) {
+            console.log(`📧 Using email from populated userId: ${order.userId.email}`);
+            userEmail = order.userId.email;
+        }
+        // Then check direct email property
+        else if (order.email) {
+            console.log(`📧 Using email from order.email: ${order.email}`);
+            userEmail = order.email;
+        }
+        
+        // Final check if we have an email
+        if (!userEmail) {
+            console.log('❌ Cannot send cancellation email: No email address available');
+            console.log('Order userId:', order.userId);
+            console.log('Order email property:', order.email);
+            console.log('Override email:', overrideEmail);
+            return false;
+        }
+        
+        console.log(`📧 Will send email to: ${userEmail}`);
+        
+        // Format order date
+        const orderDate = new Date(order.createdAt).toLocaleDateString();
+        
+        // Format currency
+        const formatCurrency = (amount) => {
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD'
+            }).format(amount);
+        };
+        
+        // Create appropriate content based on refund status
+        let refundContent = '';
+        if (refundDetails) {
+            refundContent = `
+                <div style="margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-left: 4px solid #28a745; border-radius: 4px;">
+                    <h3 style="margin-top: 0; color: #28a745;">Refund Information</h3>
+                    <p>A refund for ${formatCurrency(refundDetails.amount)} will be processed to your original payment method.</p>
+                    <p>Please allow <strong>${refundDetails.estimatedDays}</strong> for the refund to appear in your account.</p>
+                    <p>Payment method: ${refundDetails.method}</p>
+                </div>
+            `;
+        } else {
+            // No refund needed or applicable
+            refundContent = `
+                <p>No payment was processed for this order, so no refund is necessary.</p>
+            `;
+        }
+        
+        // Build the email content
+        const content = `
+            <p>Hello ${order.userId?.firstName || 'there'},</p>
+            
+            <p>Your order #${order.orderNumber} from ${orderDate} has been cancelled.</p>
+            
+            <div style="margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-left: 4px solid #dc3545; border-radius: 4px;">
+                <h3 style="margin-top: 0; color: #dc3545;">Cancellation Details</h3>
+                <p><strong>Reason:</strong> ${reason || 'No reason provided'}</p>
+                <p><strong>Cancelled on:</strong> ${new Date().toLocaleDateString()}</p>
+            </div>
+            
+            <h3>Order Summary</h3>
+            <p>Order #: <strong>${order.orderNumber}</strong></p>
+            <p>Order Date: ${orderDate}</p>
+            <p>Order Total: ${formatCurrency(order.amount)}</p>
+            <p>Items: ${order.products?.length || 0}</p>
+            
+            ${refundContent}
+            
+            <p style="margin-top: 20px;">If you have any questions regarding this cancellation or your refund, please contact our customer support team.</p>
+            
+            <div style="margin-top: 30px; text-align: center;">
+                <a href="https://yourdomain.com/contact" 
+                   style="display: inline-block; background-color: #007bff; color: white; padding: 10px 20px; border-radius: 4px; text-decoration: none; font-weight: 500;">
+                    Contact Support
+                </a>
+            </div>
+        `;
+        
+        console.log('📧 Email content prepared, sending email...');
+        
+        // Send the email with try-catch for detailed error logging
+        try {
+            const result = await emailSender.sendTemplatedEmail(
+                userEmail,
+                `Order #${order.orderNumber} Cancellation`,
+                'Order Cancellation Confirmation',
+                content,
+                {
+                    headerBgColor: '#dc3545',
+                    headerTextColor: '#ffffff'
+                }
+            );
+            console.log('📧 Email sent successfully! Result:', result);
+            return true;
+        } catch (emailError) {
+            console.error('❌ Error from email service:', emailError);
+            if (emailError.response) {
+                console.error('❌ Email service response:', emailError.response.body);
+            }
+            throw emailError; // Re-throw for outer catch
+        }
+    } catch (error) {
+        console.error('❌ Error in sendCancellationEmail:', error);
+        return false;
+    }
+}
+// ...existing code...
+
+router.post('/:id/cancel', async (req, res) => {
+    console.log(`📦 API CALL: POST /orders/${req.params.id}/cancel`);
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const orderId = req.params.id;
+        const { reason, adminNote, refundEstimate } = req.body;
+        
+        // Validate ID format
+        if (!mongoose.Types.ObjectId.isValid(orderId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid order ID format"
+            });
+        }
+        
+        // Find the order
+        console.log(`🔍 Finding order ${orderId}...`);
+        const order = await Order.findById(orderId);
+        
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
+        
+        console.log(`✅ Found order: ${order._id}, status: ${order.status}`);
+        console.log(`👤 Order userId: ${order.userId}`);
+        
+        // Check if order can be cancelled
+        const nonCancellableStatuses = ["shipped", "delivered", "cancelled", "refunded"];
+        if (nonCancellableStatuses.includes(order.status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Order cannot be cancelled because it is already ${order.status}`
+            });
+        }
+        
+        // USER EMAIL DISCOVERY - ONLY FROM USER MODEL USING ORDER.USERID
+        console.log(`🔎 Starting user email discovery process...`);
+        
+        let userEmail = null;
+        let emailSent = false;
+        
+        // Extract userId from the order document
+        if (order.userId) {
+            console.log(`📧 Looking up email using userId: ${order.userId}`);
+            
+            try {
+                // Using mongoose directly to find user by ID
+                const userDoc = await mongoose.model('User').findById(order.userId);
+                
+                if (userDoc && userDoc.email) {
+                    userEmail = userDoc.email;
+                    console.log(`✅ Retrieved email using userId: ${userEmail}`);
+                } else {
+                    console.log(`❌ No user found with ID: ${order.userId}`);
+                }
+            } catch (emailError) {
+                console.error(`❌ Error looking up user:`, emailError.message);
+                console.error(emailError);
+            }
+        } else {
+            console.log(`❌ Order does not have a userId`);
+        }
+        
+        // Determine if refund is needed
+        let refundDetails = null;
+        if (order.isPaid) {
+            refundDetails = {
+                amount: order.amount,
+                currency: order.currency || 'USD',
+                method: order.paymentMethod || 'PayPal',
+                estimatedDays: refundEstimate || '5-10 business days'
+            };
+            console.log(`💰 Refund needed for paid order: ${JSON.stringify(refundDetails)}`);
+        }
+        
+        // Update order status and add status history entry
+        order.status = "cancelled";
+        order.statusHistory.push({
+            status: "cancelled",
+            timestamp: new Date(),
+            note: reason || "Order cancelled by system"
+        });
+        
+        // Add admin note if provided
+        if (adminNote) {
+            if (!order.notes) order.notes = '';
+            order.notes += `\n[ADMIN ${new Date().toISOString()}] ${adminNote}`;
+        }
+        
+        console.log(`💾 Saving cancelled order`);
+        await order.save();
+        
+        // Try to send notification email
+        console.log(`📧 Attempting to send cancellation email...`);
+        
+        if (userEmail) {
+            try {
+                // Log all the parameters going into email function for debugging
+                console.log(`📧 Email parameters:`, {
+                    recipientEmail: userEmail,
+                    orderNumber: order.orderNumber || order._id.toString(),
+                    orderDate: order.createdAt,
+                    orderTotal: order.amount,
+                    itemCount: order.products?.length || 0,
+                    hasRefundDetails: !!refundDetails,
+                    cancelReason: reason
+                });
+                
+                // Send email with all the gathered information
+                emailSent = await sendCancellationEmail(order, reason, refundDetails, userEmail);
+                
+                if (emailSent) {
+                    console.log(`✅ Cancellation email successfully sent to ${userEmail}!`);
+                } else {
+                    console.log(`⚠️ Email sending returned false`);
+                }
+            } catch (emailError) {
+                console.error(`❌ Error during email sending process:`, emailError.message);
+            }
+        } else {
+            console.log(`⚠️ Cannot send email: No valid email address found for this order`);
+        }
+        
+        return res.status(200).json({
+            success: true,
+            message: "Order cancelled successfully" + (emailSent ? " and notification email sent" : ""),
+            emailSent: emailSent,
+            emailAddress: userEmail || null,
+            data: {
+                orderId: order._id,
+                status: order.status,
+                refundDetails: refundDetails
+            }
+        });
+    } catch (error) {
+        console.error(`❌ Error cancelling order:`, error);
+        return res.status(500).json({
+            success: false,
+            message: "Error cancelling order",
+            error: error.message
+        });
+    }
+});
+
 
 module.exports = router;

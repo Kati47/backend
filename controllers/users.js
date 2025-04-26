@@ -8,6 +8,59 @@ console.log('Token model imported');
 
 const Product = require('../models/product');
 
+
+
+exports.getUserEmailById = async (req, res) => {
+    console.log('getUserEmailById function called with params:', req.params);
+    
+    try {
+        console.log('Extracting user ID from params...');
+        const userId = req.params.id;
+        console.log('Looking up user email by ID:', userId);
+        
+        console.log('Fetching only user email field...');
+        const user = await User.findById(userId).select('email');
+        console.log('User found:', user ? 'Yes' : 'No');
+        
+        if (!user) {
+            console.error('User not found with ID:', userId);
+            return res.status(404).json({ message: 'User Not Found' });
+        }
+        
+        console.log('Successfully retrieved user email');
+        return res.json({ email: user.email });
+    } catch (error) {
+        console.error('Error in getUserEmailById:', error);
+        return res.status(500).json({ type: error.name, message: error.message });
+    }
+}
+
+
+exports.getUserNameById = async (req, res) => {
+    console.log('getUserNameById function called with params:', req.params);
+    
+    try {
+        console.log('Extracting user ID from params...');
+        const userId = req.params.id;
+        console.log('Looking up user name by ID:', userId);
+        
+        console.log('Fetching only user name field...');
+        const user = await User.findById(userId).select('name');
+        console.log('User found:', user ? 'Yes' : 'No');
+        
+        if (!user) {
+            console.error('User not found with ID:', userId);
+            return res.status(404).json({ message: 'User Not Found' });
+        }
+        
+        console.log('Successfully retrieved user name');
+        return res.json({ name: user.name });
+    } catch (error) {
+        console.error('Error in getUserNameById:', error);
+        return res.status(500).json({ type: error.name, message: error.message });
+    }
+}
+
 exports.getUserCount = async function (req, res) {
     console.log('getUserCount function called');
     
