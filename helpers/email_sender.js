@@ -17,8 +17,8 @@ const createTransporter = () => {
     port: 465,
     secure: true,
     auth: {
-      user: 'khadijahouda70@gmail.com', 
-      pass: 'evslegjnlovlbhaj'
+      user: env.EMAIL_USER, 
+      pass: env.EMAIL_PASS,
     },
     tls: {
       rejectUnauthorized: false // Fix for self-signed certificate error
