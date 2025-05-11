@@ -116,7 +116,7 @@ exports.sendMail = async (to, subject, htmlMessage) => {
     
     console.log('Setting up email options...');
     const mailOptions = {
-      from: 'khadijahouda70@gmail.com',
+      from: env.email,
       to: to,
       subject: subject,
       html: htmlMessage
