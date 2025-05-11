@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/kati15k/firsttry#readme",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@paypal/checkout-server-sdk": "^1.0.3",
     "bcryptjs": "^3.0.0",
     "body-parser": "^1.20.3",

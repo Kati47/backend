@@ -7,6 +7,15 @@ const ProductSchema = new mongoose.Schema({
     categories: {type: Array},
     size: {type: String, required: true},
     color: {type: String, required: true},
+    // Consider using this structure:
+dimensions: {
+    width: {type: Number, required: false},
+    height: {type: Number, required: false},
+    depth: {type: Number, required: false},
+    diameter: {type: Number, required: false}, // For round items
+    unit: {type: String, enum: ['cm', 'in', 'm'], default: 'cm',required:false},
+    displaySize: {type: String, required: false} // For human-readable size
+},
     price: {type: Number, required: true},
     inStock: {type: Boolean, default: true},
     quantity: {type: Number, default: 10},

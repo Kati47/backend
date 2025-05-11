@@ -849,18 +849,19 @@ exports.moveToSaved = async (req, res) => {
 
 /**
  * Unified function to recommend products based on furniture items
- * Handles both simple lists and detailed room designs
+
  */
 exports.getProductRecommendations = async (req, res) => {
     console.log('🪑 Get product recommendations request received');
     
     try {
         let furnitureItems = [];
+        let budgetRange = null;
         
         // Handle both GET and POST requests with different input formats
         if (req.method === 'GET') {
             console.log('🔍 Query parameters:', req.query);
-            const { categories, limit = 8 } = req.query;
+            const { categories, limit = 8, minPrice, maxPrice } = req.query;
             
             if (!categories) {
                 return res.status(400).json({
@@ -874,9 +875,17 @@ exports.getProductRecommendations = async (req, res) => {
                 ? categories.map(c => c.toLowerCase())
                 : categories.split(',').map(c => c.toLowerCase());
                 
+            // Parse budget parameters if provided
+            if (minPrice !== undefined || maxPrice !== undefined) {
+                budgetRange = {};
+                if (minPrice !== undefined) budgetRange.min = parseFloat(minPrice);
+                if (maxPrice !== undefined) budgetRange.max = parseFloat(maxPrice);
+                console.log('💰 Budget range:', budgetRange);
+            }
+                
         } else {  // POST
             console.log('📦 Request body:', req.body);
-            const { furniture, items } = req.body;
+            const { furniture, items, budget, minPrice, maxPrice } = req.body;
             
             // Handle both detailed furniture objects and simple item lists
             if (furniture && Array.isArray(furniture)) {
@@ -888,6 +897,28 @@ exports.getProductRecommendations = async (req, res) => {
                 furnitureItems = Array.isArray(req.body.categories) 
                     ? req.body.categories.map(c => c.toLowerCase())
                     : req.body.categories.split(',').map(c => c.toLowerCase());
+            }
+            
+            // Parse budget parameters
+            if (budget || minPrice !== undefined || maxPrice !== undefined) {
+                budgetRange = {};
+                
+                // Handle single budget value or object with min/max
+                if (budget !== undefined) {
+                    if (typeof budget === 'object') {
+                        if (budget.min !== undefined) budgetRange.min = parseFloat(budget.min);
+                        if (budget.max !== undefined) budgetRange.max = parseFloat(budget.max);
+                    } else {
+                        // Treat as maximum budget
+                        budgetRange.max = parseFloat(budget);
+                    }
+                }
+                
+                // These take precedence over budget object if both provided
+                if (minPrice !== undefined) budgetRange.min = parseFloat(minPrice);
+                if (maxPrice !== undefined) budgetRange.max = parseFloat(maxPrice);
+                
+                console.log('💰 Budget range:', budgetRange);
             }
         }
         
@@ -937,7 +968,8 @@ exports.getProductRecommendations = async (req, res) => {
         const recommendations = {
             primaryProducts: [],     // products matching user's requested items
             complementaryProducts: [], // products that complement the user's items
-            byCategory: {}           // products organized by furniture type
+            byCategory: {},          // products organized by furniture type
+            budgetFriendly: []       // budget-optimized products
         };
         
         const limit = parseInt(req.query.limit || req.body.limit || 8);
@@ -953,16 +985,26 @@ exports.getProductRecommendations = async (req, res) => {
             
             console.log(`🔍 Searching for "${furnitureType}" products using categories:`, mappedCategories);
             
-            // Find primary products for this furniture type
-            const primaryProducts = await Product.find({
+            // Build query for this furniture type
+            let query = {
                 $or: [
                     { categories: { $in: mappedCategories } },
                     { title: { $regex: normalizedType, $options: 'i' } },
                     { tags: { $in: [normalizedType] } }
                 ]
-            })
-            .sort({ rating: -1 })
-            .limit(limit);
+            };
+            
+            // Add budget constraints if provided
+            if (budgetRange) {
+                query.price = {};
+                if (budgetRange.min !== undefined) query.price.$gte = budgetRange.min;
+                if (budgetRange.max !== undefined) query.price.$lte = budgetRange.max;
+            }
+            
+            // Find primary products for this furniture type
+            const primaryProducts = await Product.find(query)
+                .sort({ rating: -1 })
+                .limit(limit);
             
             console.log(`✅ Found ${primaryProducts.length} primary products for "${furnitureType}"`);
             
@@ -1001,15 +1043,25 @@ exports.getProductRecommendations = async (req, res) => {
                         return categoryMapping[normalized] || [normalized];
                     });
                     
-                    const complementaryProducts = await Product.find({
+                    // Build complementary query with budget constraints
+                    let complementaryQuery = {
                         $or: [
                             { categories: { $in: complementaryCategoriesMapped } },
                             { title: { $regex: new RegExp(newComplementaryTypes.join('|'), 'i') } },
                             { tags: { $in: newComplementaryTypes } }
                         ]
-                    })
-                    .sort({ rating: -1 })
-                    .limit(Math.ceil(limit / 2));
+                    };
+                    
+                    // Add budget constraints if provided
+                    if (budgetRange) {
+                        complementaryQuery.price = {};
+                        if (budgetRange.min !== undefined) complementaryQuery.price.$gte = budgetRange.min;
+                        if (budgetRange.max !== undefined) complementaryQuery.price.$lte = budgetRange.max;
+                    }
+                    
+                    const complementaryProducts = await Product.find(complementaryQuery)
+                        .sort({ rating: -1 })
+                        .limit(Math.ceil(limit / 2));
                     
                     // Add to overall complementary products
                     recommendations.complementaryProducts = [
@@ -1031,16 +1083,61 @@ exports.getProductRecommendations = async (req, res) => {
             .values()
         ).sort((a, b) => (b.rating || 0) - (a.rating || 0));
         
+        // Create budget-optimized list if budget range provided
+        if (budgetRange) {
+            // Combine all products 
+            const allProducts = [...recommendations.primaryProducts];
+            
+            // Sort by best value (using rating/price ratio)
+            recommendations.budgetFriendly = allProducts
+                .filter(product => product.price > 0) // Avoid division by zero
+                .sort((a, b) => {
+                    const ratingA = a.rating || 3; // Default rating if not available
+                    const ratingB = b.rating || 3;
+                    return (ratingB / b.price) - (ratingA / a.price); // Higher value first
+                })
+                .slice(0, limit);
+                
+            console.log(`💰 Selected ${recommendations.budgetFriendly.length} budget-friendly recommendations`);
+        }
+        
         // Limit results to avoid overwhelming responses
         recommendations.primaryProducts = recommendations.primaryProducts.slice(0, limit * 2);
         recommendations.complementaryProducts = recommendations.complementaryProducts.slice(0, limit);
         
-        console.log(`✅ Total recommendations - Primary: ${recommendations.primaryProducts.length}, Complementary: ${recommendations.complementaryProducts.length}`);
+        console.log(`✅ Total recommendations - Primary: ${recommendations.primaryProducts.length}, Complementary: ${recommendations.complementaryProducts.length}, Budget-friendly: ${recommendations.budgetFriendly?.length || 0}`);
+        
+        // If budget was specified, include total costs in response
+        let budgetAnalysis = null;
+        if (budgetRange) {
+            // Calculate minimum cost to furnish with all primary categories
+            const minCostByCategory = {};
+            let totalMinCost = 0;
+            
+            for (const [category, products] of Object.entries(recommendations.byCategory)) {
+                if (products.length > 0) {
+                    // Find cheapest product in each category
+                    const cheapest = products.reduce((min, product) => 
+                        (product.price < min.price) ? product : min, products[0]);
+                    
+                    minCostByCategory[category] = cheapest.price;
+                    totalMinCost += cheapest.price;
+                }
+            }
+            
+            budgetAnalysis = {
+                minCostByCategory,
+                totalMinCost,
+                budgetRange,
+                withinBudget: budgetRange.max ? totalMinCost <= budgetRange.max : true
+            };
+        }
         
         return res.status(200).json({
             success: true,
             furnitureItems: uniqueFurnitureTypes,
-            recommendations
+            recommendations,
+            budgetAnalysis
         });
         
     } catch (error) {
@@ -1053,6 +1150,758 @@ exports.getProductRecommendations = async (req, res) => {
     }
 };
 
+
+
+/**
+ * Enhanced product differentiation and technical details for comparison
+ * This function updates the existing compareProducts controller with better product-specific analysis
+ */
+exports.compareProducts = async (req, res) => {
+    console.log('🔄 Product comparison request received');
+    console.log('📦 Request body:', req.body);
+    
+    try {
+        const { productIds, userId } = req.body;
+        
+        // Validate input
+        if (!productIds || !Array.isArray(productIds) || productIds.length < 2) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please provide at least 2 product IDs to compare'
+            });
+        }
+        
+        // Fetch products without trying to populate reviews
+        const products = await Product.find({ _id: { $in: productIds } });
+        
+        if (products.length === 0 || products.length < productIds.length) {
+            return res.status(404).json({
+                success: false,
+                message: 'One or more products could not be found'
+            });
+        }
+        
+        console.log(`✅ Successfully retrieved ${products.length} products for comparison`);
+        
+        // Initialize the comparison structure
+        const comparison = {
+            basic: {}, 
+            price: {},
+            appearance: {},
+            technicalDetails: {},
+            function: {},
+            compatibility: {},
+            maintenance: {}
+        };
+        
+        // Get price stats
+        const priceArray = products.map(p => p.price);
+        const cheapestPrice = Math.min(...priceArray);
+        const mostExpensivePrice = Math.max(...priceArray);
+        
+        // Utility function to extract type from product name
+        const deriveProductType = (name) => {
+            name = name.toLowerCase();
+            const typeMap = {
+                'bed': ['bed', 'mattress'],
+                'table': ['table', 'desk'],
+                'chair': ['chair'],
+                'sofa': ['sofa', 'couch', 'sectional'],
+                'lamp': ['lamp', 'light'],
+                'storage': ['shelf', 'cabinet', 'dresser', 'nightstand'],
+                'vase': ['vase'],
+                'rug': ['rug', 'carpet', 'mat']
+            };
+            
+            for (const [type, keywords] of Object.entries(typeMap)) {
+                if (keywords.some(keyword => name.includes(keyword))) {
+                    return type;
+                }
+            }
+            return 'furniture';
+        };
+        
+        // Utility function to extract size from product name
+        const deriveSizeFromName = (name) => {
+            name = name.toLowerCase();
+            const sizeMap = {
+                'Single/Twin': ['single', 'twin'],
+                'Double': ['double', 'full'],
+                'Queen': ['queen'],
+                'King': ['king'],
+                'Small': ['small', 'compact'],
+                'Large': ['large', 'big']
+            };
+            
+            for (const [size, keywords] of Object.entries(sizeMap)) {
+                if (keywords.some(keyword => name.includes(keyword))) {
+                    return size;
+                }
+            }
+            return '';
+        };
+        
+        // Extract product types and sizes from names
+        products.forEach(product => {
+            product.derivedType = deriveProductType(product.title);
+            
+            // Add size information based on name if not present in product
+            if (!product.size) {
+                product.derivedSize = deriveSizeFromName(product.title);
+            }
+        });
+        
+        // Utility function to derive material from product name
+        const deriveMaterial = (name) => {
+            name = name.toLowerCase();
+            const materials = [
+                { name: 'Wood', keywords: ['wood', 'wooden', 'oak', 'pine', 'maple', 'walnut'] },
+                { name: 'Metal', keywords: ['metal', 'steel', 'iron', 'aluminum'] },
+                { name: 'Glass', keywords: ['glass'] },
+                { name: 'Fabric', keywords: ['fabric', 'cloth', 'textile', 'cotton', 'linen'] },
+                { name: 'Leather', keywords: ['leather'] }
+            ];
+            
+            for (const material of materials) {
+                if (material.keywords.some(keyword => name.includes(keyword))) {
+                    return material.name;
+                }
+            }
+            return "";
+        };
+        
+        // Process each product
+        products.forEach(product => {
+            const id = product._id.toString();
+            const productType = product.derivedType;
+            const name = product.title.toLowerCase();
+            
+            // Basic product info
+            comparison.basic[id] = {
+                id,
+                title: product.title,
+                price: product.price,
+                img: product.img,
+                thumbnails: product.img ? [product.img] : [],
+                inStock: product.inStock,
+                quantity: product.quantity,
+                productTypes: product.categories || [productType.toUpperCase()]
+            };
+            
+            // Price comparison with direct comparison
+            const price = product.price;
+            
+            // Find the other product for direct comparison
+            const otherProducts = products.filter(p => p._id.toString() !== id);
+            const otherProduct = otherProducts.length > 0 ? otherProducts[0] : null;
+            
+            // Determine price position and create comparison text
+            let pricePosition, priceInsight, directComparisonText;
+            
+            // Set price position and base insight
+            if (price === cheapestPrice) {
+                pricePosition = "cheapest";
+                priceInsight = `Most affordable option at $${price.toFixed(2)}`;
+            } else if (price === mostExpensivePrice) {
+                pricePosition = "most expensive";
+                priceInsight = `Premium option at $${price.toFixed(2)}`;
+            } else {
+                pricePosition = "mid-range";
+                priceInsight = `Mid-range option at $${price.toFixed(2)}`;
+            }
+            
+            // Add direct comparison text if we have another product to compare with
+            if (otherProduct) {
+                const priceDiff = Math.abs(price - otherProduct.price);
+                const basePrice = Math.min(price, otherProduct.price);
+                const percentDiff = Math.round((priceDiff / basePrice) * 100);
+                
+                if (price < otherProduct.price) {
+                    directComparisonText = `$${priceDiff.toFixed(2)} (${percentDiff}%) cheaper than ${otherProduct.title}`;
+                } else if (price > otherProduct.price) {
+                    directComparisonText = `$${priceDiff.toFixed(2)} (${percentDiff}%) more expensive than ${otherProduct.title}`;
+                } else {
+                    directComparisonText = `Same price as ${otherProduct.title}`;
+                }
+            } else {
+                directComparisonText = "";
+            }
+            
+            comparison.price[id] = {
+                price: price,
+                formattedPrice: `$${price.toFixed(2)}`,
+                position: pricePosition,
+                insight: priceInsight,
+                directComparison: directComparisonText
+            };
+            
+            // Determine style from product name
+            const getStyle = (name) => {
+                const styles = [
+                    { name: 'Modern', keywords: ['modern'] },
+                    { name: 'Traditional', keywords: ['traditional', 'classic'] },
+                    { name: 'Vintage', keywords: ['vintage', 'retro', 'antique'] },
+                    { name: 'Rustic', keywords: ['rustic', 'farmhouse', 'country'] },
+                    { name: 'Contemporary', keywords: ['contemporary', 'current'] },
+                    { name: 'Industrial', keywords: ['industrial', 'urban'] },
+                    { name: 'Minimalist', keywords: ['minimalist', 'minimal', 'simple'] }
+                ];
+                
+                for (const style of styles) {
+                    if (style.keywords.some(keyword => name.includes(keyword))) {
+                        return style.name;
+                    }
+                }
+                return 'Classic';
+            };
+            
+            // Appearance info
+            comparison.appearance[id] = {
+                color: product.color || "",
+                style: getStyle(name)
+            };
+            
+            // Technical details
+            comparison.technicalDetails[id] = {
+                dimensions: product.dimensions || { unit: "cm" },
+                size: product.size || product.derivedSize || "",
+                material: deriveMaterial(name)
+            };
+            
+            // Map product types to functions
+            const functionMap = {
+                'bed': 'Sleeping and resting',
+                'table': 'Surface for activities and dining',
+                'chair': 'Seating and comfort',
+                'sofa': 'Relaxation and seating multiple people',
+                'lamp': 'Illumination and ambiance',
+                'storage': 'Organization and storing items',
+                'vase': 'Displaying flowers and decorative element',
+                'rug': 'Floor covering and room accent'
+            };
+            
+            // Function based on product type
+            comparison.function[id] = {
+                primaryFunction: functionMap[productType] || 'Functional decor for your space',
+                secondaryFunctions: [],
+                uniqueCapabilities: []
+            };
+            
+            // Add secondary functions based on product type and keywords
+            const secondaryFunctions = {
+                'bed': {
+                    'storage': 'Storage underneath',
+                    'adjustable': 'Adjustable positions',
+                    'foldable': 'Space-saving foldable design'
+                },
+                'sofa': {
+                    'sleeper': 'Converts to bed',
+                    'recliner': 'Reclining function',
+                    'sectional': 'Modular arrangement options'
+                },
+                'chair': {
+                    'swivel': 'Rotates 360 degrees',
+                    'recliner': 'Reclining function',
+                    'folding': 'Collapsible for storage'
+                },
+                'table': {
+                    'extendable': 'Extends for more surface area',
+                    'folding': 'Folds for storage',
+                    'adjustable': 'Height adjustment'
+                }
+            };
+            
+            // Add relevant secondary functions
+            if (secondaryFunctions[productType]) {
+                for (const [keyword, description] of Object.entries(secondaryFunctions[productType])) {
+                    if (name.includes(keyword)) {
+                        comparison.function[id].secondaryFunctions.push(description);
+                    }
+                }
+            }
+            
+            // Compatibility suggestions based on product type
+            const compatibilityMap = {
+                'bed': ['Nightstand', 'Dresser', 'Bedside Lamp', 'Rug'],
+                'sofa': ['Coffee Table', 'Side Table', 'Area Rug', 'Floor Lamp'],
+                'chair': ['Side Table', 'Floor Lamp', 'Ottoman'],
+                'table': ['Chair', 'Rug', 'Pendant Light'],
+                'lamp': ['Side Table', 'Desk', 'Console Table'],
+                'storage': ['Decorative Boxes', 'Bookends', 'Wall Art'],
+                'rug': ['Coffee Table', 'Sofa', 'Chairs']
+            };
+            
+            comparison.compatibility[id] = {
+                pairsWellWith: compatibilityMap[productType] || [],
+                complementaryProducts: [],
+                roomStyles: ['Eclectic', 'Contemporary', 'Modern', productType === 'bed' ? 'Cozy' : 'Minimalist']
+            };
+            
+            // Maintenance info based on materials
+            const materialMaintenanceMap = {
+                'Wood': {
+                    cleaning: "Dust regularly and clean with wood cleaner",
+                    care: ["Avoid direct sunlight", "Use coasters for drinks", "Polish periodically"],
+                    lifespan: "10-30 years with proper care"
+                },
+                'Fabric': {
+                    cleaning: "Vacuum regularly and spot clean as needed",
+                    care: ["Professional cleaning recommended for stains", "Rotate cushions regularly", "Avoid direct sunlight"],
+                    lifespan: "5-15 years depending on quality and use"
+                },
+                'Metal': {
+                    cleaning: "Wipe with damp cloth and dry thoroughly",
+                    care: ["Apply metal polish periodically", "Protect from scratches", "Check for rust"],
+                    lifespan: "15-25 years with proper care"
+                },
+                'Glass': {
+                    cleaning: "Clean with glass cleaner and lint-free cloth",
+                    care: ["Handle with care", "Avoid placing hot items directly on surface"],
+                    lifespan: "10+ years with careful use"
+                },
+                'Leather': {
+                    cleaning: "Dust and wipe with leather cleaner",
+                    care: ["Condition twice a year", "Keep away from direct heat or sunlight", "Blot spills immediately"],
+                    lifespan: "10-20 years with proper maintenance"
+                }
+            };
+            
+            // Set maintenance based on derived material
+            const material = deriveMaterial(name);
+            comparison.maintenance[id] = {
+                cleaning: material && materialMaintenanceMap[material] ? materialMaintenanceMap[material].cleaning : "",
+                care: material && materialMaintenanceMap[material] ? [...materialMaintenanceMap[material].care] : [],
+                lifespan: material && materialMaintenanceMap[material] ? materialMaintenanceMap[material].lifespan : "",
+                warranty: "Standard store return policy"
+            };
+        });
+        
+        // Create comparison summary
+        const functionalDifferences = {
+            title: "How These Products Serve Different Needs",
+            differences: products.map(p => {
+                const pType = p.derivedType;
+                const price = p.price;
+                
+                // Create unique value proposition based on product attributes
+                let uniqueValue;
+                if (p.derivedSize === 'Single/Twin') {
+                    uniqueValue = "Space-efficient sleeping solution for one person";
+                } else if (['Queen', 'King'].includes(p.derivedSize)) {
+                    uniqueValue = "Spacious sleeping area for couples";
+                } else if (p.title.toLowerCase().includes('colorful')) {
+                    uniqueValue = "Adds vibrant color accent to your space";
+                } else if (p.title.toLowerCase().includes('ergonomic')) {
+                    uniqueValue = "Designed for optimal body support and comfort";
+                } else if (p.title.toLowerCase().includes('storage')) {
+                    uniqueValue = "Provides additional storage solutions";
+                } else {
+                    uniqueValue = "Adds style and functionality to your space";
+                }
+                
+                // Create recommendation for when to choose this product
+                let whenToChoose;
+                if (price === cheapestPrice) {
+                    whenToChoose = "Choose when looking for the most affordable option";
+                } else if (price === mostExpensivePrice) {
+                    whenToChoose = "Choose when premium quality is your priority";
+                } else {
+                    whenToChoose = "Choose for a balance of quality and affordability";
+                }
+                
+                return {
+                    id: p._id.toString(),
+                    title: p.title,
+                    primaryFunction: comparison.function[p._id.toString()].primaryFunction,
+                    uniqueValue,
+                    whenToChoose
+                };
+            })
+        };
+        
+        // Extract technical specs for comparison
+        const techSpecs = [];
+        
+        // Add size comparison
+        techSpecs.push({
+            name: "Size",
+            values: products.reduce((acc, p) => {
+                acc[p._id.toString()] = p.size || p.derivedSize || "Standard";
+                return acc;
+            }, {})
+        });
+        
+        // If products have colors, compare them
+        if (products.some(p => p.color)) {
+            techSpecs.push({
+                name: "Color",
+                values: products.reduce((acc, p) => {
+                    const name = p.title.toLowerCase();
+                    acc[p._id.toString()] = p.color || 
+                        (name.includes('colorful') ? "Colorful" : 
+                         name.includes('white') ? "White" :
+                         name.includes('black') ? "Black" :
+                         name.includes('blue') ? "Blue" :
+                         name.includes('red') ? "Red" :
+                         "Not specified");
+                    return acc;
+                }, {})
+            });
+        }
+        
+        // Add material comparison based on name inference
+        techSpecs.push({
+            name: "Material",
+            values: products.reduce((acc, p) => {
+                acc[p._id.toString()] = deriveMaterial(p.title);
+                return acc;
+            }, {})
+        });
+        
+        // Determine best choice recommendations
+        const bestChoice = {
+            forFunctionality: {},
+            forAesthetics: {},
+            forValue: {}
+        };
+        
+        // Best value product (based on price only since we don't have ratings)
+        const cheapestProduct = products.find(p => p.price === cheapestPrice);
+        bestChoice.forValue = {
+            id: cheapestProduct._id.toString(),
+            title: cheapestProduct.title,
+            reason: `Most affordable option among compared items`
+        };
+        
+        // For aesthetics, prefer colorful or items with aesthetic terms in name
+        const aestheticTerms = [
+            { term: 'colorful', weight: 10 },
+            { term: 'modern', weight: 5 },
+            { term: 'elegant', weight: 8 },
+            { term: 'stylish', weight: 7 },
+            { term: 'design', weight: 4 },
+            { term: 'decorative', weight: 6 },
+            { term: 'artistic', weight: 9 }
+        ];
+        
+        const aestheticProducts = products
+            .map(p => {
+                const name = p.title.toLowerCase();
+                let score = 0;
+                
+                aestheticTerms.forEach(item => {
+                    if (name.includes(item.term)) {
+                        score += item.weight;
+                    }
+                });
+                
+                return {
+                    id: p._id.toString(),
+                    title: p.title,
+                    score
+                };
+            })
+            .sort((a, b) => b.score - a.score);
+        
+        if (aestheticProducts.length > 0 && aestheticProducts[0].score > 0) {
+            bestChoice.forAesthetics = {
+                id: aestheticProducts[0].id,
+                title: aestheticProducts[0].title,
+                reason: `Best aesthetic option based on style and design features`
+            };
+        }
+        
+        // Best functionality based on features and unique capabilities
+        const functionalityScore = products.map(p => {
+            const id = p._id.toString();
+            return {
+                id,
+                title: p.title,
+                score: (comparison.function[id].secondaryFunctions.length * 2) + 
+                       (comparison.function[id].uniqueCapabilities?.length || 0) +
+                       (p.title.toLowerCase().includes('ergonomic') ? 3 : 0) +
+                       (p.title.toLowerCase().includes('multifunctional') ? 4 : 0) +
+                       (p.title.toLowerCase().includes('adjustable') ? 2 : 0)
+            };
+        }).sort((a, b) => b.score - a.score);
+        
+        if (functionalityScore.length > 0 && functionalityScore[0].score > 0) {
+            bestChoice.forFunctionality = {
+                id: functionalityScore[0].id,
+                title: functionalityScore[0].title,
+                reason: "Offers the most functional features and versatility"
+            };
+        }
+        
+        // Get references to cheapest and most expensive products for buying advice
+        const expensiveProduct = products.find(p => p.price === mostExpensivePrice);
+        const priceDiff = mostExpensivePrice - cheapestPrice;
+        const priceDiffPercent = Math.round((priceDiff / cheapestPrice) * 100);
+        
+        // Create direct price comparison text
+        const priceInfoText = `The ${expensiveProduct.title} is $${priceDiff.toFixed(2)} (${priceDiffPercent}%) more expensive than the ${cheapestProduct.title}.`;
+        
+        // Generate product-specific buying advice based on product type patterns
+        let buyingAdvice = "";
+        
+        // Determine what types of products we're comparing
+        const productTypes = products.map(p => p.derivedType);
+        const uniqueTypes = [...new Set(productTypes)];
+        
+        // If all products are the same type, give specific advice
+        if (uniqueTypes.length === 1) {
+            const type = uniqueTypes[0];
+            
+            const buyingAdviceMap = {
+                'sofa': {
+                    hasSize: products.some(p => 
+                        p.size === 'Small' || 
+                        p.title.toLowerCase().includes('small') ||
+                        p.title.toLowerCase().includes('compact')),
+                    sizeAdvice: `When choosing between these sofas, consider your available space. The smaller sofa (${cheapestProduct.title}, $${cheapestProduct.price.toFixed(2)}) works better in compact rooms or apartments, while the standard-sized sofa (${expensiveProduct.title}, $${expensiveProduct.price.toFixed(2)}) offers more seating capacity for larger living areas. ${priceInfoText} Think about how many people typically need seating in your home and measure your space before deciding.`,
+                    generalAdvice: `These sofas differ primarily in styling and price point. The more premium option (${expensiveProduct.title}, $${expensiveProduct.price.toFixed(2)}) likely offers enhanced comfort or durability features, while the more affordable option (${cheapestProduct.title}, $${cheapestProduct.price.toFixed(2)}) provides good value. ${priceInfoText} Consider how the color and design will coordinate with your existing decor and how frequently the sofa will be used when making your selection.`
+                },
+                'bed': {
+                    hasSize: products.some(p => 
+                        ['Single/Twin', 'Double', 'Queen', 'King'].includes(p.size || p.derivedSize)),
+                    sizeAdvice: `When choosing between these beds, consider your room size and sleeping needs. Larger beds offer more space but require larger rooms, while single beds work well for one person or smaller spaces. ${priceInfoText} The price ranges from $${cheapestPrice.toFixed(2)} for the ${cheapestProduct.title} to $${mostExpensivePrice.toFixed(2)} for the ${expensiveProduct.title}. Measure your room carefully to ensure proper fit and consider who will be using the bed regularly.`,
+                    generalAdvice: `When selecting between these beds, consider the design, material quality, and comfort features. The more premium option (${expensiveProduct.title}, $${expensiveProduct.price.toFixed(2)}) may offer better support or durability, while the more affordable option (${cheapestProduct.title}, $${cheapestProduct.price.toFixed(2)}) provides good value. ${priceInfoText} Your sleeping preferences and how long you plan to use the bed should guide your decision.`
+                },
+                'table': {
+                    generalAdvice: `When selecting between these tables, consider how you'll use it most frequently - for dining, work, or decoration. The ${cheapestProduct.title} ($${cheapestPrice.toFixed(2)}) and ${expensiveProduct.title} ($${mostExpensivePrice.toFixed(2)}) differ in price by $${priceDiff.toFixed(2)}. The size, height, and sturdiness should match your primary use case, and the style should complement your room's aesthetic.`
+                },
+                'chair': {
+                    generalAdvice: `When choosing between these chairs, consider comfort for your primary use case, whether it's dining, working, or relaxing. Prices range from $${cheapestPrice.toFixed(2)} for the ${cheapestProduct.title} to $${mostExpensivePrice.toFixed(2)} for the ${expensiveProduct.title}. The size should be appropriate for your space, and the style should complement your existing furniture.`
+                },
+                'lamp': {
+                    generalAdvice: `When selecting between these lamps, consider the lighting needs of your space - ambient, task, or accent lighting. The ${cheapestProduct.title} costs $${cheapestPrice.toFixed(2)} while the ${expensiveProduct.title} is priced at $${mostExpensivePrice.toFixed(2)}. The size should be proportional to the surface it sits on, and the style should enhance your room's decor.`
+                }
+            };
+            
+            if (buyingAdviceMap[type]) {
+                // Use size-specific advice if available and size variations exist
+                if (buyingAdviceMap[type].hasSize) {
+                    buyingAdvice = buyingAdviceMap[type].sizeAdvice;
+                } else {
+                    buyingAdvice = buyingAdviceMap[type].generalAdvice;
+                }
+            } else {
+                // Generic furniture advice for other types
+                buyingAdvice = `When choosing between these furniture pieces, consider your space requirements, how the item will be used, and your existing decor. The ${expensiveProduct.title} ($${mostExpensivePrice.toFixed(2)}) is ${priceDiffPercent}% more expensive than the ${cheapestProduct.title} ($${cheapestPrice.toFixed(2)}). The more premium option may offer better quality or unique features, while the more affordable option provides good value.`;
+            }
+        } else {
+            // Mixed product types
+            buyingAdvice = `These products serve different purposes in your home. Consider what functionality you need most for your space. Prices range from $${cheapestPrice.toFixed(2)} for the ${cheapestProduct.title} to $${mostExpensivePrice.toFixed(2)} for the ${expensiveProduct.title}. Compare the price points in relation to how frequently you'll use each item and how long you plan to keep it.`;
+        }
+        
+        // Complete comparison summary
+        const summary = {
+            products: products.map(p => ({
+                id: p._id.toString(),
+                title: p.title,
+                price: p.price,
+                image: p.img,
+                summary: p.desc?.substring(0, 100) || ""
+            })),
+            functionalDifferences,
+            technicalComparison: {
+                title: "Technical Specifications Comparison",
+                specs: techSpecs
+            },
+            bestChoice,
+            buyingAdvice
+        };
+        
+        return res.status(200).json({
+            success: true,
+            comparison,
+            summary
+        });
+        
+    } catch (error) {
+        console.error('❌ Error comparing products:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to compare products',
+            error: error.message
+        });
+    }
+};
+
+
+
+// Helper function to extract sentiment from reviews
+function calculateReviewSentiment(reviews) {
+    if (!reviews || reviews.length === 0) return null;
+    
+    // Simple sentiment analysis based on rating and keywords
+    let positive = 0;
+    let negative = 0;
+    let neutral = 0;
+    
+    const positiveKeywords = ['love', 'great', 'excellent', 'perfect', 'amazing', 'good', 'best', 'happy', 'recommend'];
+    const negativeKeywords = ['bad', 'poor', 'terrible', 'disappointing', 'waste', 'broken', 'defective', 'unhappy', 'avoid'];
+    
+    reviews.forEach(review => {
+        // Rating-based sentiment
+        if (review.rating >= 4) {
+            positive++;
+        } else if (review.rating <= 2) {
+            negative++;
+        } else {
+            neutral++;
+        }
+        
+        // Text-based sentiment (simplistic approach)
+        if (review.text) {
+            const lowerText = review.text.toLowerCase();
+            
+            let hasPositive = positiveKeywords.some(keyword => lowerText.includes(keyword));
+            let hasNegative = negativeKeywords.some(keyword => lowerText.includes(keyword));
+            
+            if (hasPositive && !hasNegative) {
+                positive += 0.5; // Add partial weight
+            } else if (hasNegative && !hasPositive) {
+                negative += 0.5;
+            } else if (hasPositive && hasNegative) {
+                neutral += 0.5;
+            }
+        }
+    });
+    
+    const total = reviews.length * 1.5; // Adjusted for the text analysis weight
+    
+    return {
+        positive: positive / total,
+        negative: negative / total,
+        neutral: neutral / total
+    };
+}
+/**
+ * Get related products to compare with a specific product
+ * @route GET /api/products/:id/comparison-options
+ */
+exports.getComparisonOptions = async (req, res) => {
+    console.log(`🔍 Get comparison options for product ${req.params.id}`);
+    
+    try {
+        const productId = req.params.id;
+        const { limit = 5 } = req.query;
+        
+        // Validate product ID
+        if (!mongoose.Types.ObjectId.isValid(productId)) {
+            console.log('❌ Invalid product ID format');
+            return res.status(400).json({ 
+                success: false,
+                message: "Invalid product ID format" 
+            });
+        }
+        
+        // Get the source product
+        const product = await Product.findById(productId);
+        
+        if (!product) {
+            console.log(`❌ Product not found: ${productId}`);
+            return res.status(404).json({ 
+                success: false,
+                message: "Product not found" 
+            });
+        }
+        
+        console.log(`✅ Found source product: ${product.title || product._id}`);
+        
+        // Extract product categories and price range
+        const categories = product.categories || [];
+        const price = product.price || 0;
+        const priceRange = {
+            min: Math.max(0, price * 0.7),  // 30% lower
+            max: price * 1.3                // 30% higher
+        };
+        
+        console.log(`🔍 Finding comparison options in categories:`, categories);
+        console.log(`💰 Price range: $${priceRange.min.toFixed(2)} - $${priceRange.max.toFixed(2)}`);
+        
+        // Build query for similar products
+        const query = {
+            _id: { $ne: productId }, // Exclude the current product
+            $or: [
+                { categories: { $in: categories } },  // Same category
+                { price: { $gte: priceRange.min, $lte: priceRange.max } } // Similar price
+            ]
+        };
+        
+        // Find comparison options
+        const comparisonOptions = await Product.find(query)
+            .limit(parseInt(limit))
+            .sort({ rating: -1 });  // Sort by highest rated first
+            
+        console.log(`✅ Found ${comparisonOptions.length} comparison options`);
+        
+        // Create a score for each option based on similarity
+        const optionsWithScore = comparisonOptions.map(option => {
+            // Calculate category match score
+            const categoryOverlap = option.categories ? 
+                option.categories.filter(cat => categories.includes(cat)).length : 0;
+            const categoryScore = categories.length > 0 ? 
+                categoryOverlap / Math.max(categories.length, option.categories ? option.categories.length : 1) : 0;
+            
+            // Calculate price similarity (1 = exact match, 0 = at the edge of range)
+            const priceDiff = Math.abs(option.price - price);
+            const priceRange = price * 0.3;  // 30% range
+            const priceScore = 1 - (priceDiff / priceRange);
+            
+            // Calculate feature similarity if features exist
+            let featureScore = 0;
+            if (product.features && option.features && 
+                Array.isArray(product.features) && Array.isArray(option.features)) { 
+                const productFeatureCategories = product.features.map(f => f.category);
+                const optionFeatureCategories = option.features.map(f => f.category);
+                
+                const commonCategories = productFeatureCategories.filter(cat => 
+                    optionFeatureCategories.includes(cat)
+                );
+                featureScore = productFeatureCategories.length > 0 ? 
+                    commonCategories.length / productFeatureCategories.length : 0;
+            }
+            // Combined similarity score (weighted)
+            const similarityScore = (
+                (categoryScore * 0.4) + 
+                (priceScore * 0.4) + 
+                (featureScore * 0.2)
+            ).toFixed(2);
+            
+            return {
+                ...option.toObject(),
+                similarityScore: parseFloat(similarityScore),
+                categoryScore: parseFloat(categoryScore.toFixed(2)),
+                priceScore: parseFloat(priceScore.toFixed(2)),
+                featureScore: parseFloat(featureScore.toFixed(2))
+            };
+        });
+        
+        // Sort by similarity score
+        optionsWithScore.sort((a, b) => b.similarityScore - a.similarityScore);
+        
+        return res.status(200).json({
+            success: true,
+            sourceProduct: {
+                id: product._id,
+                title: product.title || product.name,
+                price: product.price,
+                categories: product.categories
+            },
+            comparisonOptions: optionsWithScore
+        });
+        
+    } catch (error) {
+        console.error('❌ Error getting comparison options:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get comparison options',
+            error: error.message
+        });
+    }
+};
 
 // Debug/diagnostic endpoint
 exports.debugInfo = (req, res) => {

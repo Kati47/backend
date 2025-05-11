@@ -451,3 +451,67 @@ exports.getUserProfile = async (req, res) => {
         });
     }
 };
+
+// Add this after the last controller function
+
+const bcrypt = require('bcryptjs');
+
+exports.addUser = async (req, res) => {
+    console.log('addUser function called with body:', 
+        { ...req.body, passwordHash: req.body.password ? '******' : undefined });
+    
+    try {
+        console.log('Checking if email already exists...');
+        const existingUser = await User.findOne({ email: req.body.email });
+        
+        if (existingUser) {
+            console.error('Email already in use:', req.body.email);
+            return res.status(400).json({
+                message: 'Email already in use'
+            });
+        }
+        
+        console.log('Creating password hash...');
+        let passwordHash = req.body.password;
+        if (req.body.password) {
+            const salt = await bcrypt.genSalt(10);
+            passwordHash = await bcrypt.hash(req.body.password, salt);
+        }
+        
+        console.log('Creating new user...');
+        const user = new User({
+            name: req.body.name,
+            email: req.body.email,
+            passwordHash: passwordHash,
+            phone: req.body.phone,
+            street: req.body.street,
+            apartment: req.body.apartment,
+            city: req.body.city,
+            postalCode: req.body.postalCode,
+            country: req.body.country,
+            isAdmin: req.body.isAdmin || false
+        });
+        
+        console.log('Saving user to database...');
+        const savedUser = await user.save();
+        
+        if (!savedUser) {
+            console.error('Failed to create user');
+            return res.status(500).json({ message: 'User creation failed' });
+        }
+        
+        console.log('User created successfully:', savedUser._id);
+        
+        // Return user without sensitive fields
+        const userResponse = savedUser.toObject();
+        delete userResponse.passwordHash;
+        
+        return res.status(201).json(userResponse);
+    } catch (error) {
+        console.error('Error in addUser:', error);
+        return res.status(500).json({
+            type: error.name,
+            message: error.message
+        });
+    }
+};

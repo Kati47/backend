@@ -1,24 +1,9 @@
-console.log('Loading auth controller...');
-
 const { validationResult } = require('express-validator');
-console.log('express-validator imported');
-
 const { User } = require('../models/user');
-console.log('User model imported');
-
 const mailSender = require('../helpers/email_sender');
-console.log('Email sender helper imported');
-
-// bcryptjs for password hashing and verification
 const bcrypt = require('bcryptjs');
-console.log('bcryptjs imported');
-
-// jsonwebtoken to generate authentication tokens
 const jwt = require('jsonwebtoken');
-console.log('jsonwebtoken imported');
-
 const { Token } = require('../models/token');
-console.log('Token model imported');
 
 /**
  * User Registration
@@ -138,7 +123,7 @@ exports.login = async (req, res) => {
         console.log('Generating tokens for user:', user._id);
         const token = jwt.sign(
             { 
-                userId: user._id.toString(), // Convert ObjectId to string explicitly
+                userId: user._id.toString(), 
                 isAdmin: user.isAdmin 
             },
             process.env.ACCESS_TOKEN_SECRET,

@@ -14,6 +14,7 @@ const roomPlannerRouter = require('./routes/roomPlanner');
 const authRouter= require('./routes/auth');
 const userRouter= require('./routes/users');
 const testRouter= require('./routes/test');
+const assistantRouter = require('./routes/chatbotRoutes');
 const errorHandler = require('./middlewares/error_handler');
 const cookieParser = require('cookie-parser');
 const path = require('path');  
@@ -43,11 +44,13 @@ app.options('*', cors({
 }));
 app.use(cookieParser());
 
-
+app.use(`${API}/ai`, require('./routes/aiAssistantRoutes'));
+//app.use(`${API}/assistant`, assistantRouter);
 app.use(`${API}/`,testRouter);
 app.use(`${API}/`,authRouter);
 
 app.use(authJwt());  
+
 app.use(`${API}/products` ,productRouter);
 app.use(`${API}/cart` ,cartRouter);
 app.use(`${API}/order` ,orderRouter);

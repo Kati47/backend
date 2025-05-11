@@ -3,6 +3,7 @@ const router= express.Router();
 
 const usersController= require('../controllers/users');
 
+router.post('/add', usersController.addUser);
 router.get('/count',usersController.getUserCount);
 router.delete('/:id',usersController.deleteUser);
 router.get('/usersTotal',usersController.getUsers);

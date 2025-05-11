@@ -1076,7 +1076,653 @@ router.post('/create-order', async (req, res) => {
         });
     }
 });
+/**
+ * Create and capture order from cart in one step
+ * Creates an order from cart items and immediately processes payment
+ */
+router.post('/checkout-cart', async (req, res) => {
+    console.log('📦 API CALL: /checkout-cart - Combined create and capture in one step');
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        console.log('🔍 Starting one-step checkout process...');
+        // Validate request
+        const { userId, cartId, cartItems, shippingDetails, returnUrl, cancelUrl, total } = req.body;
+        
+        console.log(`🔍 Validating request data...`);
+        
+        if (!userId) {
+            console.log('❌ Missing user ID');
+            return res.status(400).json({ 
+                success: false, 
+                message: "Missing user ID" 
+            });
+        }
+        
+        if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
+            console.log('❌ Missing or invalid cart items');
+            return res.status(400).json({ 
+                success: false, 
+                message: "Cart items are required" 
+            });
+        }
+        
+        if (!shippingDetails) {
+            console.log('❌ Missing shipping details');
+            return res.status(400).json({ 
+                success: false, 
+                message: "Shipping details are required" 
+            });
+        }
+        
+        // Validate total parameter
+        if (total === undefined || total === null || isNaN(parseFloat(total))) {
+            console.log('❌ Missing or invalid total amount');
+            return res.status(400).json({ 
+                success: false, 
+                message: "Total amount is required and must be a number" 
+            });
+        }
+        
+        // Convert total to a number if it's a string
+        const totalAmount = parseFloat(total);
+        
+        console.log(`✅ Request validation passed`);
+        console.log(`🔍 Processing one-step checkout for user: ${userId}`);
+        console.log(`📦 Cart contains ${cartItems.length} items`);
+        console.log(`💰 Provided total amount: $${totalAmount.toFixed(2)}`);
+        console.log(`🛒 Cart ID: ${cartId || 'Not provided'}`);
+        
+        // Calculate order totals
+        console.log(`💰 Calculating order totals...`);
+        
+        const subtotal = cartItems.reduce((sum, item) => {
+            const price = parseFloat(item.price) || 0;
+            const quantity = parseInt(item.quantity) || 1;
+            console.log(`📊 Item: ${item.title}, Price: $${price}, Quantity: ${quantity}, Total: $${price * quantity}`);
+            return sum + (price * quantity);
+        }, 0);
+        
+        // Apply shipping cost (free for orders over $100)
+        const shippingCost = subtotal > 100 ? 0 : 9.99;
+        console.log(`📊 Shipping cost: $${shippingCost} (${subtotal > 100 ? 'Free shipping applied' : 'Standard shipping'})`);
+        
+        // Apply tax (7%)
+        const tax = subtotal * 0.07;
+        console.log(`📊 Tax (7%): $${tax.toFixed(2)}`);
+        
+        // Calculate final total - compare with provided total for validation
+        const calculatedTotal = subtotal + shippingCost + tax;
+        console.log(`📊 Calculated total: $${calculatedTotal.toFixed(2)}`);
+        
+        // Validate that the provided total matches the calculated total (with small tolerance for rounding)
+        if (Math.abs(calculatedTotal - totalAmount) > 0.01) {
+            console.log(`⚠️ Provided total ($${totalAmount.toFixed(2)}) does not match calculated total ($${calculatedTotal.toFixed(2)})`);
+            console.log(`⚠️ Proceeding with calculated total: $${calculatedTotal.toFixed(2)}`);
+        }
 
+        // Create a temporary order reference to track this transaction
+        const timestamp = Date.now();
+        const tempOrderRef = `TEMP-${timestamp}-${userId.substring(0, 8)}`;
+        console.log(`📝 Created temporary order reference: ${tempOrderRef}`);
+
+        // Generate order number
+        const orderNumber = `ORD-${timestamp.toString().substring(6)}`;
+        console.log(`📄 Generated order number: ${orderNumber}`);
+
+        // IMPORTANT: Create an actual order in MongoDB before PayPal interaction
+        console.log(`💾 Creating permanent order record in MongoDB database...`);
+        
+        // Format products for order schema
+        console.log(`🔄 Formatting product data for Order schema...`);
+        const formattedProducts = cartItems.map(item => {
+            console.log(`📦 Processing item: ${item.title || item.name}, price: ${item.price}`);
+            return {
+                productId: item.productId || item._id || new mongoose.Types.ObjectId(),
+                title: item.title || item.name || "Product",
+                price: parseFloat(item.price) || 0,
+                quantity: parseInt(item.quantity) || 1,
+                img: item.img || item.image,
+                color: item.color,
+                size: item.size
+            };
+        });
+        console.log(`✅ Formatted ${formattedProducts.length} products for order`);
+
+        // Create a new Order document
+        console.log(`🏗️ Creating new Order document...`);
+        const order = new Order({
+            userId: userId,
+            orderNumber: orderNumber,
+            products: formattedProducts,
+            subtotal: subtotal,
+            tax: tax,
+            shippingCost: shippingCost,
+            amount: calculatedTotal, // Use the calculated total for consistency
+            status: "pending",
+            statusHistory: [{
+                status: "pending",
+                timestamp: new Date(),
+                note: "Order created via one-step checkout, awaiting payment"
+            }],
+            address: {
+                street: shippingDetails.street,
+                city: shippingDetails.city,
+                country: shippingDetails.country,
+                zipCode: shippingDetails.zipCode,
+                phone: shippingDetails.phone
+            },
+            metadata: {
+                tempOrderRef: tempOrderRef,
+                cartId: cartId // Store the cartId for later deletion
+            }
+        });
+        
+        console.log(`💾 About to save order document to database...`);
+        // Save the order to get an _id
+        try {
+            await order.save();
+            console.log(`✅ Order successfully created with ID: ${order._id}`);
+        } catch (saveError) {
+            console.error(`❌ Failed to save order to database:`, saveError);
+            throw new Error(`Failed to create order in database: ${saveError.message}`);
+        }
+        
+        // Set up PayPal order with reference to our database order
+        console.log(`📡 Creating PayPal order request...`);
+        const request = new checkoutNodeJssdk.orders.OrdersCreateRequest();
+        request.prefer("return=representation");
+        
+        // Format cart items for PayPal
+        console.log(`🧾 Formatting cart items for PayPal...`);
+        const paypalItems = cartItems.map(item => {
+            console.log(`📊 PayPal item: ${item.title || 'Product'}, Price: ${parseFloat(item.price).toFixed(2)}, Quantity: ${parseInt(item.quantity) || 1}`);
+            return {
+                name: item.title || item.name || "Product",
+                unit_amount: {
+                    currency_code: "USD",
+                    value: parseFloat(item.price).toFixed(2)
+                },
+                quantity: parseInt(item.quantity) || 1,
+                description: `${item.color || ''} ${item.size || ''}`.trim() || undefined,
+                sku: item.productId || item._id || undefined,
+                category: "PHYSICAL_GOODS"
+            };
+        });
+        
+        // Get country code in proper ISO 3166-1 alpha-2 format
+        const countryCode = getCountryCode(shippingDetails.country);
+        console.log(`🌎 Using country code: ${countryCode} (converted from "${shippingDetails.country}")`);
+        
+        // Set up return and cancel URLs with query parameters for toast notifications
+        console.log(`🔗 Setting up return/cancel URLs with toast support...`);
+        
+        // Use the provided returnUrl/cancelUrl or defaults
+        let finalReturnUrl = returnUrl || 'http://localhost:3000/checkout/confirmation';
+        let finalCancelUrl = cancelUrl || 'http://localhost:3000/checkout/cancel';
+        
+        // Add toast parameters and order information to the URLs
+        try {
+            // For return URL (success), add success=true, message and orderId
+            const returnUrlObj = new URL(finalReturnUrl);
+            returnUrlObj.searchParams.set('success', 'true');
+            returnUrlObj.searchParams.set('message', 'Payment successful!');
+            returnUrlObj.searchParams.set('toastType', 'success');
+            returnUrlObj.searchParams.set('orderId', order._id.toString());
+            returnUrlObj.searchParams.set('orderNumber', orderNumber);
+            finalReturnUrl = returnUrlObj.toString();
+            console.log(`🔗 Configured return URL: ${finalReturnUrl}`);
+            
+            // For cancel URL, add canceled=true, message and orderId
+            const cancelUrlObj = new URL(finalCancelUrl);
+            cancelUrlObj.searchParams.set('canceled', 'true');
+            cancelUrlObj.searchParams.set('message', 'Payment was canceled');
+            cancelUrlObj.searchParams.set('toastType', 'error');
+            cancelUrlObj.searchParams.set('orderId', order._id.toString());
+            finalCancelUrl = cancelUrlObj.toString();
+            console.log(`🔗 Configured cancel URL: ${finalCancelUrl}`);
+        } catch (urlError) {
+            console.error(`❌ Error formatting URLs:`, urlError);
+            // If URL parsing fails, append parameters manually
+            finalReturnUrl += finalReturnUrl.includes('?') 
+                ? `&success=true&message=Payment%20successful!&toastType=success&orderId=${order._id.toString()}&orderNumber=${orderNumber}` 
+                : `?success=true&message=Payment%20successful!&toastType=success&orderId=${order._id.toString()}&orderNumber=${orderNumber}`;
+                
+            finalCancelUrl += finalCancelUrl.includes('?') 
+                ? `&canceled=true&message=Payment%20was%20canceled&toastType=error&orderId=${order._id.toString()}` 
+                : `?canceled=true&message=Payment%20was%20canceled&toastType=error&orderId=${order._id.toString()}`;
+            
+            console.log(`🔗 Manually formatted return URL: ${finalReturnUrl}`);
+            console.log(`🔗 Manually formatted cancel URL: ${finalCancelUrl}`);
+        }
+        
+        // Build the PayPal order request body
+        console.log(`📝 Building PayPal order request body...`);
+        const requestBody = {
+            intent: "CAPTURE", // IMPORTANT: Set intent to CAPTURE for immediate payment
+            purchase_units: [
+                {
+                    reference_id: order._id.toString(), // Use our actual order ID
+                    description: `Order #${orderNumber}`,
+                    custom_id: userId, // Include user ID for reference
+                    amount: {
+                        currency_code: "USD",
+                        value: calculatedTotal.toFixed(2), // Use calculated total
+                        breakdown: {
+                            item_total: {
+                                currency_code: "USD",
+                                value: subtotal.toFixed(2)
+                            },
+                            shipping: {
+                                currency_code: "USD",
+                                value: shippingCost.toFixed(2)
+                            },
+                            tax_total: {
+                                currency_code: "USD",
+                                value: tax.toFixed(2)
+                            }
+                        }
+                    },
+                    items: paypalItems,
+                    shipping: {
+                        name: {
+                            full_name: `${shippingDetails.firstName || ''} ${shippingDetails.lastName || ''}`.trim()
+                        },
+                        address: {
+                            address_line_1: shippingDetails.street || "",
+                            address_line_2: shippingDetails.address2 || "",
+                            admin_area_2: shippingDetails.city || "",
+                            admin_area_1: shippingDetails.state || "",
+                            postal_code: shippingDetails.zipCode || "",
+                            country_code: countryCode
+                        }
+                    }
+                }
+            ],
+            application_context: {
+                shipping_preference: "SET_PROVIDED_ADDRESS",
+                user_action: "PAY_NOW",
+                return_url: finalReturnUrl,
+                cancel_url: finalCancelUrl
+            }
+        };
+        
+        request.requestBody(requestBody);
+        
+        // Log the request body for debugging (truncated)
+        console.log('📄 PayPal request body (truncated):');
+        console.log(JSON.stringify(requestBody).substring(0, 300) + '...');
+        
+        // Call PayPal API to create order
+        console.log('📡 Sending create order request to PayPal...');
+        let paypalOrder;
+        try {
+            paypalOrder = await paypalClient().execute(request);
+            console.log(`✅ PayPal order created successfully: ${paypalOrder.result.id}`);
+            console.log(`📊 Initial PayPal order status: ${paypalOrder.result.status}`);
+        } catch (paypalError) {
+            console.error(`❌ Error creating PayPal order:`, paypalError);
+            // Mark order as failed in our database
+            order.status = "cancelled";
+            order.statusHistory.push({
+                status: "cancelled",
+                timestamp: new Date(),
+                note: `PayPal order creation failed: ${paypalError.message}`
+            });
+            await order.save();
+            console.log(`📝 Updated order status to cancelled due to PayPal error`);
+            throw paypalError;
+        }
+        
+        // Update our order with the PayPal order ID
+        console.log(`📝 Updating order with PayPal details...`);
+        order.paymentDetails = {
+            provider: "PayPal",
+            paypalOrderId: paypalOrder.result.id,
+            status: paypalOrder.result.status,
+            createdAt: new Date()
+        };
+        
+        // Save again with the updated PayPal info
+        console.log(`💾 Saving order with PayPal details...`);
+        await order.save();
+        console.log(`✅ Order updated with PayPal details (ID: ${paypalOrder.result.id})`);
+        
+        // Check if we need to redirect the user to approve the payment
+        if (paypalOrder.result.status === 'CREATED') {
+            // Find the approval URL in the links array
+            const approvalLink = paypalOrder.result.links.find(link => 
+                link.rel === "approve" || link.rel === "payer-action"
+            );
+            
+            if (!approvalLink) {
+                console.error(`❌ No approval link found in PayPal response!`);
+                console.error(`📋 Links available:`, paypalOrder.result.links);
+                
+                // Mark order as problematic
+                order.status = "cancelled";
+                order.statusHistory.push({
+                    status: "cancelled",
+                    timestamp: new Date(),
+                    note: "Missing PayPal approval URL"
+                });
+                await order.save();
+                console.log(`📝 Updated order status to cancelled due to missing approval URL`);
+                
+                throw new Error("No approval URL returned from PayPal");
+            }
+            
+            console.log(`👉 Approval URL returned: ${approvalLink.href}`);
+            console.log(`📤 Returning redirect approval flow to client`);
+            
+            return res.status(200).json({
+                success: true,
+                flowType: "redirect",
+                paypalOrderId: paypalOrder.result.id,
+                approvalUrl: approvalLink.href,
+                orderId: order._id.toString(),
+                orderNumber: orderNumber,
+                tempOrderRef,
+                toast: {
+                    type: 'info',
+                    message: 'Redirecting to PayPal for payment approval...'
+                }
+            });
+        }
+        
+        // If PayPal status is already APPROVED or COMPLETED, we can proceed to capture
+        if (paypalOrder.result.status === 'APPROVED' || 
+            paypalOrder.result.status === 'COMPLETED') {
+            
+            console.log(`✅ PayPal order already in ${paypalOrder.result.status} status, proceeding with capture...`);
+            
+            // Proceed with capturing the payment
+            console.log(`📡 Sending capture request to PayPal API...`);
+            let capture;
+            try {
+                const captureRequest = new checkoutNodeJssdk.orders.OrdersCaptureRequest(paypalOrder.result.id);
+                captureRequest.requestBody({});
+                
+                capture = await paypalClient().execute(captureRequest);
+                console.log(`✅ Payment captured successfully: ${capture.result.id}`);
+                console.log(`📊 Capture status: ${capture.result.status}`);
+                
+                // Log capture details
+                if (capture.result.purchase_units && 
+                    capture.result.purchase_units[0].payments && 
+                    capture.result.purchase_units[0].payments.captures) {
+                    
+                    const captures = capture.result.purchase_units[0].payments.captures;
+                    console.log(`📊 Captures:`, captures.map(c => ({
+                        id: c.id,
+                        status: c.status,
+                        amount: `${c.amount.value} ${c.amount.currency_code}`,
+                        createTime: c.create_time,
+                        updateTime: c.update_time
+                    })));
+                }
+            } catch (captureError) {
+                console.error(`❌ Error capturing payment:`, captureError);
+                
+                // Special handling for already captured payments
+                if (captureError.statusCode === 422) {
+                    console.log(`ℹ️ This appears to be an "already captured" error`);
+                    
+                    // Check if we need to update our database
+                    const paypalOrderDetails = await checkOrderStatus(paypalOrder.result.id);
+                    
+                    if (paypalOrderDetails && paypalOrderDetails.status === 'COMPLETED') {
+                        console.log(`✅ PayPal confirms order is COMPLETED, updating our database...`);
+                        
+                        // Update order with completed status
+                        order.isPaid = true;
+                        order.paidAt = new Date();
+                        order.status = "processing";
+                        order.paymentDetails.status = "COMPLETED";
+                        order.paymentDetails.completedAt = new Date();
+                        order.statusHistory.push({
+                            status: "processing",
+                            timestamp: new Date(),
+                            note: "Payment already completed in PayPal"
+                        });
+                        
+                        await order.save();
+                        console.log(`✅ Order updated with completed payment status`);
+                        
+                        // Delete the cart if we have a cartId
+                        if (cartId) {
+                            await deleteCart(cartId, userId, order._id);
+                        }
+                        
+                        return res.status(200).json({
+                            success: true,
+                            flowType: "captured",
+                            paypalOrderId: paypalOrder.result.id,
+                            orderId: order._id.toString(),
+                            orderNumber: orderNumber,
+                            status: "COMPLETED",
+                            alreadyCaptured: true,
+                            toast: {
+                                type: 'success',
+                                message: 'Payment completed successfully!'
+                            }
+                        });
+                    }
+                }
+                
+                // For other capture errors, return partial success
+                console.log(`⚠️ Returning partial success with approval URL`);
+                
+                // Find the approval URL again
+                const approvalLink = paypalOrder.result.links.find(link => 
+                    link.rel === "approve" || link.rel === "payer-action"
+                );
+                
+                if (approvalLink) {
+                    return res.status(200).json({
+                        success: true,
+                        flowType: "redirect",
+                        paypalOrderId: paypalOrder.result.id,
+                        approvalUrl: approvalLink.href,
+                        orderId: order._id.toString(),
+                        orderNumber: orderNumber,
+                        captureError: captureError.message,
+                        toast: {
+                            type: 'warning',
+                            message: 'Additional approval required. Please complete payment on PayPal.'
+                        }
+                    });
+                } else {
+                    throw captureError; // Re-throw if we can't provide a fallback URL
+                }
+            }
+            
+            // Update order with capture information
+            console.log(`📝 Updating order with capture information...`);
+            const captureId = capture.result.purchase_units[0].payments.captures[0].id;
+            const captureStatus = capture.result.status;
+            
+            order.paymentDetails = {
+                ...order.paymentDetails,
+                status: captureStatus,
+                captureId: captureId,
+                capturedAt: new Date(),
+                paymentData: capture.result
+            };
+            
+            // Update order status based on payment result
+            if (captureStatus === "COMPLETED") {
+                order.status = "processing";
+                order.statusHistory.push({
+                    status: "processing",
+                    timestamp: new Date(),
+                    note: "Payment completed via one-step checkout"
+                });
+                order.isPaid = true;
+                order.paidAt = new Date();
+                
+                console.log(`💰 Payment successful for order ${order._id}`);
+                
+                // Delete the cart if we have a cartId
+                if (cartId) {
+                    console.log(`🗑️ Attempting to delete cart with ID: ${cartId}`);
+                    await deleteCart(cartId, userId, order._id);
+                }
+            } else {
+                console.log(`⚠️ Payment not completed. Status: ${captureStatus}`);
+            }
+            
+            // Save the updated order
+            console.log(`💾 Saving final order with payment details...`);
+            await order.save();
+            console.log(`✅ Order successfully saved with payment details`);
+            
+            // Return success response
+            console.log(`📤 Sending successful capture response to client`);
+            return res.status(200).json({
+                success: true,
+                flowType: "captured",
+                paypalOrderId: paypalOrder.result.id,
+                captureId: order.paymentDetails.captureId,
+                status: order.paymentDetails.status,
+                orderId: order._id.toString(),
+                orderNumber: orderNumber,
+                amount: order.amount,
+                toast: {
+                    type: 'success',
+                    message: 'Payment completed successfully!'
+                }
+            });
+        }
+        
+        // If we get here, it's an unexpected status
+        console.log(`⚠️ PayPal returned unexpected status: ${paypalOrder.result.status}`);
+        
+        // Find the approval URL as a fallback
+        const approvalLink = paypalOrder.result.links.find(link => 
+            link.rel === "approve" || link.rel === "payer-action"
+        );
+        
+        if (approvalLink) {
+            console.log(`🔗 Returning approval URL as fallback: ${approvalLink.href}`);
+            return res.status(200).json({
+                success: true,
+                flowType: "redirect",
+                paypalOrderId: paypalOrder.result.id,
+                approvalUrl: approvalLink.href,
+                orderId: order._id.toString(),
+                orderNumber: orderNumber,
+                unexpectedStatus: paypalOrder.result.status,
+                toast: {
+                    type: 'warning',
+                    message: 'Please complete payment on PayPal'
+                }
+            });
+        }
+        
+        // If we can't even find an approval URL, something is wrong
+        console.error(`❌ PayPal returned unexpected status and no approval URL`);
+        throw new Error(`Unexpected PayPal order status: ${paypalOrder.result.status}`);
+        
+    } catch (error) {
+        console.error(`❌ Error in checkout-cart:`, error);
+        console.error(util.inspect(error, { depth: 3, colors: true }));
+        
+        // Include toast message in error response
+        res.status(500).json({
+            success: false,
+            message: "Error processing checkout", 
+            error: error.message,
+            toast: {
+                type: 'error',
+                message: 'Checkout failed. Please try again.'
+            }
+        });
+    }
+});
+
+/**
+ * Helper function to check PayPal order status
+ * @param {string} paypalOrderId - The PayPal order ID
+ * @returns {Promise<Object>} The order details
+ */
+async function checkOrderStatus(paypalOrderId) {
+    console.log(`🔍 Checking PayPal order status for: ${paypalOrderId}`);
+    try {
+        const getOrderRequest = new checkoutNodeJssdk.orders.OrdersGetRequest(paypalOrderId);
+        const orderDetails = await paypalClient().execute(getOrderRequest);
+        console.log(`✅ PayPal order status: ${orderDetails.result.status}`);
+        return orderDetails.result;
+    } catch (error) {
+        console.error(`❌ Error checking PayPal order status:`, error);
+        return null;
+    }
+}
+
+/**
+ * Helper function to delete cart
+ * @param {string} cartId - The cart ID
+ * @param {string} userId - The user ID
+ * @param {string} orderId - The order ID
+ */
+async function deleteCart(cartId, userId, orderId) {
+    console.log(`🗑️ Attempting to delete cart with ID: ${cartId}`);
+    try {
+        // Validate cart ID format
+        if (!mongoose.Types.ObjectId.isValid(cartId)) {
+            console.log(`❌ Invalid cart ID format: ${cartId}`);
+            return false;
+        }
+        
+        // Try to find the cart first
+        const cartExists = await Cart.findById(cartId);
+        if (!cartExists) {
+            console.log(`ℹ️ Cart with ID ${cartId} not found or already deleted`);
+            return true;
+        }
+        
+        // Delete the cart
+        const deleteResult = await Cart.findByIdAndDelete(cartId);
+        
+        if (deleteResult) {
+            console.log(`✅ Successfully deleted cart: ${cartId}`);
+            
+            // Update the order with cart deletion info
+            if (orderId) {
+                console.log(`📝 Updating order ${orderId} with cart deletion reference...`);
+                try {
+                    const order = await Order.findById(orderId);
+                    if (order) {
+                        // Add note to status history
+                        order.statusHistory.push({
+                            status: order.status,
+                            timestamp: new Date(),
+                            note: `Cart ${cartId} deleted after payment`
+                        });
+                        
+                        // Update metadata
+                        if (!order.metadata) order.metadata = {};
+                        order.metadata.cartDeletedAt = new Date();
+                        
+                        await order.save();
+                        console.log(`✅ Order updated with cart deletion reference`);
+                    }
+                } catch (orderError) {
+                    console.error(`⚠️ Error updating order with cart deletion info:`, orderError);
+                    // Continue even if order update fails
+                }
+            }
+            
+            return true;
+        } else {
+            console.log(`⚠️ Cart deletion returned null result`);
+            return false;
+        }
+    } catch (error) {
+        console.error(`❌ Error deleting cart:`, error);
+        return false;
+    }
+}
 /**
  * Capture PayPal Order Payment
  * Enhanced with better error handling and debugging
@@ -1454,7 +2100,7 @@ router.post('/create-from-cart', async (req, res) => {
     try {
         console.log('🔍 Starting order creation process...');
         // Validate request
-        const { userId, cartItems, shippingDetails, returnUrl, cancelUrl } = req.body;
+        const { userId, cartItems, shippingDetails, returnUrl, cancelUrl, orderId, total } = req.body;
         
         console.log(`🔍 Validating request data...`);
         
@@ -1482,9 +2128,32 @@ router.post('/create-from-cart', async (req, res) => {
             });
         }
         
+        // Validate orderId parameter (new requirement)
+        if (!orderId) {
+            console.log('❌ Missing order ID');
+            return res.status(400).json({ 
+                success: false, 
+                message: "Order ID is required" 
+            });
+        }
+        
+        // Validate total parameter (new requirement)
+        if (total === undefined || total === null || isNaN(parseFloat(total))) {
+            console.log('❌ Missing or invalid total amount');
+            return res.status(400).json({ 
+                success: false, 
+                message: "Total amount is required and must be a number" 
+            });
+        }
+        
+        // Convert total to a number if it's a string
+        const totalAmount = parseFloat(total);
+        
         console.log(`✅ Request validation passed`);
         console.log(`🔍 Processing cart-to-order for user: ${userId}`);
         console.log(`📦 Cart contains ${cartItems.length} items`);
+        console.log(`💰 Provided total amount: $${totalAmount.toFixed(2)}`);
+        console.log(`🔑 Processing with order ID: ${orderId}`);
         
         // Calculate order totals
         console.log(`💰 Calculating order totals...`);
@@ -1501,15 +2170,31 @@ router.post('/create-from-cart', async (req, res) => {
         // Apply tax (7%)
         const tax = subtotal * 0.07;
         
-        // Calculate final total
-        const total = subtotal + shippingCost + tax;
+        // Calculate final total - compare with provided total for validation
+        const calculatedTotal = subtotal + shippingCost + tax;
         
-        console.log(`💰 Order totals: Subtotal: $${subtotal.toFixed(2)}, Shipping: $${shippingCost.toFixed(2)}, Tax: $${tax.toFixed(2)}, Total: $${total.toFixed(2)}`);
+        console.log(`💰 Order totals: Subtotal: $${subtotal.toFixed(2)}, Shipping: $${shippingCost.toFixed(2)}, Tax: $${tax.toFixed(2)}, Calculated Total: $${calculatedTotal.toFixed(2)}`);
+        
+        // Validate that the provided total matches the calculated total (with small tolerance for rounding)
+        if (Math.abs(calculatedTotal - totalAmount) > 0.01) {
+            console.log(`⚠️ Provided total ($${totalAmount.toFixed(2)}) does not match calculated total ($${calculatedTotal.toFixed(2)})`);
+            // Depending on your business requirements, you might want to:
+            // 1. Reject the request (uncomment below)
+            /*
+            return res.status(400).json({ 
+                success: false, 
+                message: "Total amount mismatch. Please recalculate your order total." 
+            });
+            */
+            // 2. OR log the warning but proceed using the calculated total (current behavior)
+            console.log(`⚠️ Proceeding with calculated total: $${calculatedTotal.toFixed(2)}`);
+        }
 
         // Create a temporary order reference to track this transaction
         const timestamp = Date.now();
         const tempOrderRef = `TEMP-${timestamp}-${userId.substring(0, 8)}`;
         console.log(`📝 Created temporary order reference: ${tempOrderRef}`);
+
 
         // IMPORTANT: Create an actual order in MongoDB before PayPal interaction
         console.log(`💾 Creating permanent order record in MongoDB database...`);
@@ -2617,6 +3302,84 @@ router.post('/:id/cancel', async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Error cancelling order",
+            error: error.message
+        });
+    }
+});
+
+/**
+ * Get all orders for a specific user
+ * Retrieves all orders associated with a given user ID
+ */
+router.get('/user/:userId', async (req, res) => {
+    console.log(`📦 API CALL: GET /orders/user/${req.params.userId}`);
+    
+    try {
+        const userId = req.params.userId;
+        
+        // Validate user ID format
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid user ID format"
+            });
+        }
+        
+        // Extract query parameters for pagination and filtering
+        const { status, startDate, endDate, limit, page } = req.query;
+        
+        // Build query object - always filter by userId
+        const query = { userId: userId };
+        
+        // Add additional filters if provided
+        if (status) {
+            query.status = status;
+        }
+        
+        // Date range filter
+        if (startDate || endDate) {
+            query.createdAt = {};
+            
+            if (startDate) {
+                query.createdAt.$gte = new Date(startDate);
+            }
+            
+            if (endDate) {
+                query.createdAt.$lte = new Date(endDate);
+            }
+        }
+        
+        console.log(`🔍 Fetching orders for user: ${userId} with filters:`, query);
+        
+        // Set up pagination
+        const pageSize = parseInt(limit) || 10;
+        const currentPage = parseInt(page) || 1;
+        const skip = (currentPage - 1) * pageSize;
+        
+        // Find orders with pagination
+        const orders = await Order.find(query)
+            .sort({ createdAt: -1 }) // Sort by newest first
+            .skip(skip)
+            .limit(pageSize);
+            
+        // Get total count for pagination
+        const totalOrders = await Order.countDocuments(query);
+        
+        console.log(`✅ Found ${orders.length} orders for user ${userId} out of ${totalOrders} total`);
+        
+        return res.status(200).json({
+            success: true,
+            count: orders.length,
+            total: totalOrders,
+            page: currentPage,
+            pages: Math.ceil(totalOrders / pageSize),
+            data: orders
+        });
+    } catch (error) {
+        console.error(`❌ Error fetching user orders:`, error);
+        return res.status(500).json({
+            success: false,
+            message: "Error fetching user orders",
             error: error.message
         });
     }
